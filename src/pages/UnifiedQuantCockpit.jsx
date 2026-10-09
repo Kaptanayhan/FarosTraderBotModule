@@ -47,7 +47,11 @@ import {
   ArrowDownRight,
   ArrowRight,
   ArrowLeft,
-  ArrowUp
+  ArrowUp,
+  Menu,
+  ChevronLeft,
+  Scale,
+  FlaskConical
 } from 'lucide-react';
 
 const API_BASE = window.location.origin.includes(':5173') ? 'http://localhost:8000' : '';
@@ -234,6 +238,9 @@ export default function UnifiedQuantCockpit() {
   // Add Account Modal State
   const [isAddAccountModalOpen, setIsAddAccountModalOpen] = useState(false);
 
+  // Sol Sidebar Açık/Kapalı Durumu (Açılıp kapanabilen yan menü)
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+
   // Funding Fee Arbitrage Tab State
   const [fundingTop10, setFundingTop10] = useState([]);
   const [fundingReverseTop5, setFundingReverseTop5] = useState([]);
@@ -262,7 +269,24 @@ export default function UnifiedQuantCockpit() {
   });
   const [isRunningBacktest, setIsRunningBacktest] = useState(false);
   const [backtestResult, setBacktestResult] = useState(null);
-  const [backtestViewTab, setBacktestViewTab] = useState('overview'); // 'overview' | 'agents' | 'trades'
+  const [backtestViewTab, setBacktestViewTab] = useState('overview'); // 'overview' | 'agents' | 'trades' | 'activity_log'
+
+  // 100x Ultra Yüksek Kaldıraçlı Sniper Bot / Ajan State
+  const [sniperEngine, setSniperEngine] = useState(null);
+  const [sniperCoins, setSniperCoins] = useState([]);
+  const [sniperSelectedSymbol, setSniperSelectedSymbol] = useState('BTCUSDT');
+  const [sniperLeverage, setSniperLeverage] = useState(100);
+  const [sniperMargin, setSniperMargin] = useState(100);
+  const [sniperTrailingStep, setSniperTrailingStep] = useState(0.08);
+  const [sniperAutoFlip, setSniperAutoFlip] = useState(true);
+  const [sniperSelectionMode, setSniperSelectionMode] = useState('AUTO_VOLUME'); // 'AUTO_VOLUME' | 'MANUAL'
+  const [sniperActionMsg, setSniperActionMsg] = useState('');
+  const [isLoadingSniper, setIsLoadingSniper] = useState(false);
+
+  // Detaylı Aktivite Günlüğü (Backtest & Kuant Ajanları Telemetrisi) State
+  const [activityLogs, setActivityLogs] = useState([]);
+  const [logModuleFilter, setLogModuleFilter] = useState('ALL'); // 'ALL' | 'BACKTEST' | 'SNIPER_100X' | 'FUNDING_ARB' | 'COUNCIL'
+  const [logSeverityFilter, setLogSeverityFilter] = useState('ALL'); // 'ALL' | 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR'
 
   // Settings Categories in Settings View: 'risk' | 'api' | 'telegram' | 'auth' | 'updates'
   const [settingsCategory, setSettingsCategory] = useState('risk');
@@ -853,6 +877,175 @@ export default function UnifiedQuantCockpit() {
     }));
   };
 
+  // ----------------------------------------------------
+  // DETAYLI AKTİVİTE GÜNLÜĞÜ (Activity Logs) HANDLERS
+  // ----------------------------------------------------
+  const fetchActivityLogs = async () => {
+    try {
+      const q = new URLSearchParams();
+      if (logModuleFilter !== 'ALL') q.set('module', logModuleFilter);
+      if (logSeverityFilter !== 'ALL') q.set('severity', logSeverityFilter);
+      const res = await fetch(`${API_BASE}/api/activity-logs?${q.toString()}`);
+      const data = await res.json();
+      if (data && data.success) {
+        setActivityLogs(data.logs || []);
+      }
+    } catch (err) {
+      console.error('Activity logs fetch error:', err);
+    }
+  };
+
+  const handleClearActivityLogs = async () => {
+    try {
+      await fetch(`${API_BASE}/api/activity-logs/clear`, { method: 'POST' });
+      fetchActivityLogs();
+    } catch (err) {
+      console.error('Clear logs error:', err);
+    }
+  };
+
+  const handleExportActivityLogsCsv = () => {
+    if (!activityLogs || activityLogs.length === 0) return;
+    const header = 'ID,Zaman,Modul,Ajan,Parite,Eylem,PnL_USDT,PnL_Pct,Onem,Mesaj\n';
+    const rows = activityLogs.map(l => 
+      `"${l.id}","${l.timestamp}","${l.module}","${l.agent_name}","${l.symbol}","${l.action}","${l.pnl_usdt || 0}","${l.pnl_pct || 0}","${l.severity}","${(l.message || '').replace(/"/g, '""')}"`
+    ).join('\n');
+    const blob = new Blob([header + rows], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `aegis_activity_logs_${Date.now()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // ----------------------------------------------------
+  // 100x SNİPER SCALPER (Dynamic SAR & Trailing) HANDLERS
+  // ----------------------------------------------------
+  const fetchSniperStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/sniper-100x/status`);
+      const data = await res.json();
+      if (data && data.success) {
+        setSniperEngine(data.engine);
+      }
+    } catch (err) {
+      console.error('Sniper status fetch error:', err);
+    }
+  };
+
+  const fetchSniperCoins = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/sniper-100x/coins`);
+      const data = await res.json();
+      if (data && data.success) {
+        setSniperCoins(data.coins || []);
+      }
+    } catch (err) {
+      console.error('Sniper coins fetch error:', err);
+    }
+  };
+
+  const handleStartSniper = async () => {
+    try {
+      setIsLoadingSniper(true);
+      setSniperActionMsg('100x Sniper motoru başlatılıyor...');
+      const res = await fetch(`${API_BASE}/api/sniper-100x/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: sniperSelectedSymbol,
+          leverage: sniperLeverage,
+          margin: sniperMargin,
+          trailing_step: sniperTrailingStep,
+          auto_flip: sniperAutoFlip,
+          coin_selection_mode: sniperSelectionMode,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSniperEngine(data.engine);
+        setSniperActionMsg(`⚡ 100X SNİPER BAŞLATILDI! ${data.engine.symbol} ${data.engine.leverage}x ile işlemde.`);
+        fetchActivityLogs();
+        setTimeout(() => setSniperActionMsg(''), 5000);
+      } else {
+        alert(data.message || '100x motoru başlatılamadı.');
+      }
+    } catch (err) {
+      alert('Hata: ' + err.message);
+    } finally {
+      setIsLoadingSniper(false);
+    }
+  };
+
+  const handleStopSniper = async (closePosition = true) => {
+    try {
+      setIsLoadingSniper(true);
+      setSniperActionMsg('100x pozisyonu kârla kapatılıyor...');
+      const res = await fetch(`${API_BASE}/api/sniper-100x/stop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ close_position: closePosition }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSniperEngine(data.engine);
+        setSniperActionMsg('⏹ 100X MOTORU DURDURULDU. Kâr/Zarar realize edildi.');
+        fetchActivityLogs();
+        setTimeout(() => setSniperActionMsg(''), 5000);
+      }
+    } catch (err) {
+      alert('Hata: ' + err.message);
+    } finally {
+      setIsLoadingSniper(false);
+    }
+  };
+
+  const handleInstantFlip = async () => {
+    try {
+      setIsLoadingSniper(true);
+      setSniperActionMsg('Pozisyon anında ters yöne çevriliyor (FLIP)...');
+      const res = await fetch(`${API_BASE}/api/sniper-100x/flip`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSniperEngine(data.engine);
+        setSniperActionMsg(`🔄 FLIP BAŞARILI: Yeni yön ${data.engine.active_position?.side} 100x!`);
+        fetchActivityLogs();
+        setTimeout(() => setSniperActionMsg(''), 5000);
+      } else {
+        alert(data.message || 'Ters yöne çevrilemedi.');
+      }
+    } catch (err) {
+      alert('Hata: ' + err.message);
+    } finally {
+      setIsLoadingSniper(false);
+    }
+  };
+
+  // 100x Sniper Poller
+  useEffect(() => {
+    if (mainView === 'sniper100x') {
+      fetchSniperStatus();
+      fetchSniperCoins();
+      fetchActivityLogs();
+      const interval = setInterval(() => {
+        fetchSniperStatus();
+        fetchActivityLogs();
+      }, 1500);
+      return () => clearInterval(interval);
+    }
+  }, [mainView, logModuleFilter, logSeverityFilter]);
+
+  // Backtest activity log poller
+  useEffect(() => {
+    if (mainView === 'backtest') {
+      fetchActivityLogs();
+    }
+  }, [mainView, backtestResult]);
+
   // Funding periodic poller
   useEffect(() => {
     if (mainView === 'funding') {
@@ -1431,92 +1624,70 @@ export default function UnifiedQuantCockpit() {
          ======================================================== */}
       <header className="h-14 border-b border-slate-800/80 bg-[#0c1017]/95 px-4 flex items-center justify-between gap-3 text-xs select-none sticky top-0 z-40 backdrop-blur">
         
-        {/* Sol Grup: Logo & Ana Tab Switcher */}
+        {/* Sol Grup: Yan Menü Toggle, Logo & Aktif Desk Göstergesi */}
         <div className="flex items-center gap-3 overflow-hidden">
+          {/* Yan Menü (Sidebar) Aç / Kapat Butonu */}
+          <button
+            onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+            className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-cyan-400 border border-slate-800 transition cursor-pointer flex items-center gap-1.5 shrink-0"
+            title={isSidebarCollapsed ? "Yan Menüyü Genişlet (Tüm Modülleri Göster)" : "Yan Menüyü Daralt (Ekran Alanını Genişlet)"}
+          >
+            <Menu className="w-4 h-4 text-cyan-400" />
+            <span className="hidden sm:inline text-[11px] font-bold text-slate-300">
+              {isSidebarCollapsed ? 'MENÜYÜ AÇ' : 'DARALT'}
+            </span>
+          </button>
+
           <div className="flex items-center gap-1.5 font-black text-sm tracking-wide text-cyan-400 shrink-0 mr-1">
             <span className="text-base text-cyan-400">🛡️</span>
-            <span>AEGISQUANT <span className="text-white text-xs font-semibold px-1 py-0.5 rounded bg-cyan-950/80 border border-cyan-800/50">v3.0</span></span>
+            <span>AEGISQUANT <span className="text-white text-[10px] font-semibold px-1.5 py-0.5 rounded bg-cyan-950/80 border border-cyan-800/50">v3.0</span></span>
           </div>
 
-          {/* 6 Ana Modül Sekmesi */}
-          <nav className="flex items-center gap-1 bg-slate-900/90 p-1 rounded-lg border border-slate-800 overflow-x-auto">
-            <button
-              onClick={() => setMainView('cockpit')}
-              className={`px-2.5 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
-                mainView === 'cockpit'
-                  ? 'bg-cyan-600 text-white shadow'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <LayoutDashboard className="w-3.5 h-3.5" />
-              <span>KOKPİT</span>
-            </button>
-
-            <button
-              onClick={() => setMainView('portfolio')}
-              className={`px-2.5 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
-                mainView === 'portfolio'
-                  ? 'bg-cyan-600 text-white shadow'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <PieChart className="w-3.5 h-3.5" />
-              <span>HESAP YÖNETİCİSİ</span>
-            </button>
-
-            <button
-              onClick={() => setMainView('funding')}
-              className={`px-2.5 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
-                mainView === 'funding'
-                  ? 'bg-amber-600 text-white shadow'
-                  : 'text-amber-400/90 hover:text-amber-200'
-              }`}
-              title="Binance Spot & Vadeli Fonlama Oranı (Funding Fee) Delta-Nötr Arbitraj Deski"
-            >
-              <span className="text-xs">⚖️</span>
-              <span>FONLAMA ARBİTRAJI</span>
-              {fundingEngine?.is_running && (
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-              )}
-            </button>
-
-            <button
-              onClick={() => setMainView('backtest')}
-              className={`px-2.5 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
-                mainView === 'backtest'
-                  ? 'bg-purple-600 text-white shadow'
-                  : 'text-purple-400/90 hover:text-purple-200'
-              }`}
-              title="Hummingbot Canlı & Tarihsel Veri Çoklu Ajan Backtest Simülasyonu"
-            >
-              <span className="text-xs">🧪</span>
-              <span>HUMMİNGBOT BACKTEST</span>
-            </button>
-
-            <button
-              onClick={() => setMainView('agents')}
-              className={`px-2.5 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
-                mainView === 'agents'
-                  ? 'bg-cyan-600 text-white shadow'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Bot className="w-3.5 h-3.5" />
-              <span>AJAN KONSEYİ</span>
-            </button>
-
-            <button
-              onClick={() => setMainView('settings')}
-              className={`px-2.5 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
-                mainView === 'settings'
-                  ? 'bg-cyan-600 text-white shadow'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Settings className="w-3.5 h-3.5" />
-              <span>AYARLAR</span>
-            </button>
-          </nav>
+          {/* Aktif Modül Breadcrumb Göstergesi */}
+          <div className="hidden md:flex items-center gap-2 px-3 py-1 rounded-lg bg-slate-900/90 border border-slate-800/90 text-xs font-bold shrink-0 shadow-inner">
+            <span className="text-slate-500 text-[10px] uppercase font-mono">AKTİF MODÜL:</span>
+            {mainView === 'cockpit' && (
+              <span className="text-cyan-400 flex items-center gap-1.5 font-black">
+                <LayoutDashboard className="w-3.5 h-3.5" /> KOKPİT DESKİ
+              </span>
+            )}
+            {mainView === 'portfolio' && (
+              <span className="text-cyan-400 flex items-center gap-1.5 font-black">
+                <PieChart className="w-3.5 h-3.5" /> HESAP YÖNETİCİSİ & PORTFÖY
+              </span>
+            )}
+            {mainView === 'funding' && (
+              <span className="text-amber-400 flex items-center gap-1.5 font-black">
+                <Scale className="w-3.5 h-3.5" /> FONLAMA ARBİTRAJI (Delta-Nötr)
+                {fundingEngine?.is_running && (
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping ml-1"></span>
+                )}
+              </span>
+            )}
+            {mainView === 'sniper100x' && (
+              <span className="text-rose-400 flex items-center gap-1.5 font-black">
+                <Zap className="w-3.5 h-3.5 text-rose-400 animate-pulse" /> 100X SNİPER DESKİ (Dinamik SAR & Trailing)
+                {sniperEngine?.is_running && (
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping ml-1"></span>
+                )}
+              </span>
+            )}
+            {mainView === 'backtest' && (
+              <span className="text-purple-400 flex items-center gap-1.5 font-black">
+                <FlaskConical className="w-3.5 h-3.5" /> HUMMİNGBOT BACKTEST DESKİ
+              </span>
+            )}
+            {mainView === 'agents' && (
+              <span className="text-cyan-400 flex items-center gap-1.5 font-black">
+                <Bot className="w-3.5 h-3.5" /> 11 AJAN KONSEYİ
+              </span>
+            )}
+            {mainView === 'settings' && (
+              <span className="text-slate-200 flex items-center gap-1.5 font-black">
+                <Settings className="w-3.5 h-3.5" /> SİSTEM AYARLARI
+              </span>
+            )}
+          </div>
 
           <div className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-900 border border-slate-800 text-[11px] font-medium shrink-0">
             <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`}></span>
@@ -1671,6 +1842,286 @@ export default function UnifiedQuantCockpit() {
 
         </div>
       </header>
+
+      {/* ========================================================
+          3. ANA GÖVDE: SOL AÇILIP KAPANABİLEN SIDEBAR + SAĞ İÇERİK ALANI
+         ======================================================== */}
+      <div className="flex-1 flex overflow-hidden relative">
+
+        {/* ========================================================
+            SOL SIDEBAR (Açılıp Kapanabilen Yan Menü)
+           ======================================================== */}
+        <aside
+          className={`bg-[#090c13] border-r border-slate-800/90 flex flex-col justify-between transition-all duration-300 z-30 select-none shrink-0 ${
+            isSidebarCollapsed ? 'w-[68px]' : 'w-64'
+          }`}
+        >
+          {/* Üst Kısım: Başlık & 6 Ana Modül Navigasyonu */}
+          <div className="p-2 space-y-1.5 overflow-y-auto">
+            {/* Sidebar Başlık & Kapatma Butonu */}
+            <div className="flex items-center justify-between px-2 py-2 mb-1 border-b border-slate-800/80">
+              {!isSidebarCollapsed ? (
+                <>
+                  <div className="flex items-center gap-2 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                    <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
+                    <span>Modüller & Deskler</span>
+                  </div>
+                  <button
+                    onClick={() => setIsSidebarCollapsed(true)}
+                    className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800/80 transition cursor-pointer"
+                    title="Menüyü Daralt"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => setIsSidebarCollapsed(false)}
+                  className="mx-auto p-1.5 rounded text-cyan-400 hover:text-white hover:bg-slate-800/80 transition cursor-pointer"
+                  title="Menüyü Genişlet"
+                >
+                  <Menu className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+
+            {/* 6 Navigasyon Butonu */}
+            <nav className="space-y-1">
+              {/* 1. KOKPİT */}
+              <button
+                onClick={() => setMainView('cockpit')}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold transition-all cursor-pointer group text-left ${
+                  mainView === 'cockpit'
+                    ? 'bg-gradient-to-r from-cyan-900/60 to-cyan-950/40 text-cyan-200 border-l-4 border-cyan-400 shadow-md shadow-cyan-950/50'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-900/80 border-l-4 border-transparent'
+                }`}
+                title="KOKPİT - Canlı Arbitraj & Al-Sat Masası"
+              >
+                <div className={`p-1.5 rounded-md shrink-0 ${mainView === 'cockpit' ? 'bg-cyan-500/20 text-cyan-300' : 'bg-slate-900 text-slate-400 group-hover:text-cyan-300'}`}>
+                  <LayoutDashboard className="w-4 h-4" />
+                </div>
+                {!isSidebarCollapsed && (
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="truncate">KOKPİT</span>
+                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-400 border border-cyan-800/60 font-mono">CANLI</span>
+                    </div>
+                    <p className="text-[10px] text-slate-500 font-normal truncate mt-0.5">Arbitraj & Emir Deski</p>
+                  </div>
+                )}
+              </button>
+
+              {/* 2. HESAP YÖNETİCİSİ */}
+              <button
+                onClick={() => setMainView('portfolio')}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold transition-all cursor-pointer group text-left ${
+                  mainView === 'portfolio'
+                    ? 'bg-gradient-to-r from-cyan-900/60 to-cyan-950/40 text-cyan-200 border-l-4 border-cyan-400 shadow-md shadow-cyan-950/50'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-900/80 border-l-4 border-transparent'
+                }`}
+                title="HESAP YÖNETİCİSİ - Portföy, Canlı Bakiye & API Anahtarları"
+              >
+                <div className={`p-1.5 rounded-md shrink-0 ${mainView === 'portfolio' ? 'bg-cyan-500/20 text-cyan-300' : 'bg-slate-900 text-slate-400 group-hover:text-cyan-300'}`}>
+                  <PieChart className="w-4 h-4" />
+                </div>
+                {!isSidebarCollapsed && (
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="truncate">HESAP YÖNETİCİSİ</span>
+                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-300">{accounts.length} Hesap</span>
+                    </div>
+                    <p className="text-[10px] text-slate-500 font-normal truncate mt-0.5">Portföy, API & Kasalar</p>
+                  </div>
+                )}
+              </button>
+
+              {/* 3. FONLAMA ARBİTRAJI */}
+              <button
+                onClick={() => setMainView('funding')}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold transition-all cursor-pointer group text-left ${
+                  mainView === 'funding'
+                    ? 'bg-gradient-to-r from-amber-900/50 to-amber-950/40 text-amber-200 border-l-4 border-amber-400 shadow-md shadow-amber-950/50'
+                    : 'text-amber-400/90 hover:text-amber-200 hover:bg-slate-900/80 border-l-4 border-transparent'
+                }`}
+                title="FONLAMA ARBİTRAJI - Binance Spot & Vadeli Delta-Nötr Arbitraj Deski"
+              >
+                <div className={`p-1.5 rounded-md shrink-0 relative ${mainView === 'funding' ? 'bg-amber-500/20 text-amber-300' : 'bg-slate-900 text-amber-400 group-hover:text-amber-300'}`}>
+                  <Scale className="w-4 h-4" />
+                  {fundingEngine?.is_running && (
+                    <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                  )}
+                </div>
+                {!isSidebarCollapsed && (
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="truncate">FONLAMA ARBİTRAJI</span>
+                      {fundingEngine?.is_running ? (
+                        <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-950 text-emerald-400 border border-emerald-700 font-mono animate-pulse">8H ÇALIŞIYOR</span>
+                      ) : (
+                        <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-950/80 text-amber-400 border border-amber-800/60 font-mono">DELTA-NÖTR</span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-slate-500 font-normal truncate mt-0.5">Top 10 Spot + Vadeli Arbitraj</p>
+                  </div>
+                )}
+              </button>
+
+              {/* 3.5. 100x SNİPER SCALPER */}
+              <button
+                onClick={() => setMainView('sniper100x')}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold transition-all cursor-pointer group text-left ${
+                  mainView === 'sniper100x'
+                    ? 'bg-gradient-to-r from-rose-950/70 to-red-950/50 text-rose-200 border-l-4 border-rose-500 shadow-md shadow-rose-950/50'
+                    : 'text-rose-400/90 hover:text-rose-200 hover:bg-slate-900/80 border-l-4 border-transparent'
+                }`}
+                title="100x SNİPER - 100x Kaldıraç, Dinamik SAR Tersine Dönüş & Trailing Stop"
+              >
+                <div className={`p-1.5 rounded-md shrink-0 relative ${mainView === 'sniper100x' ? 'bg-rose-500/20 text-rose-300' : 'bg-slate-900 text-rose-400 group-hover:text-rose-300'}`}>
+                  <Zap className="w-4 h-4 text-rose-400" />
+                  {sniperEngine?.is_running && (
+                    <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                  )}
+                </div>
+                {!isSidebarCollapsed && (
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="truncate">100x SNİPER</span>
+                      {sniperEngine?.is_running ? (
+                        <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-950 text-emerald-400 border border-emerald-700 font-mono animate-pulse">100X AKTİF</span>
+                      ) : (
+                        <span className="text-[9px] px-1.5 py-0.2 rounded bg-rose-950/90 text-rose-300 border border-rose-800/60 font-mono">100X SAR</span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-slate-500 font-normal truncate mt-0.5">Dinamik Flip & Trailing</p>
+                  </div>
+                )}
+              </button>
+
+              {/* 4. HUMMİNGBOT BACKTEST */}
+              <button
+                onClick={() => setMainView('backtest')}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold transition-all cursor-pointer group text-left ${
+                  mainView === 'backtest'
+                    ? 'bg-gradient-to-r from-purple-900/50 to-purple-950/40 text-purple-200 border-l-4 border-purple-400 shadow-md shadow-purple-950/50'
+                    : 'text-purple-400/90 hover:text-purple-200 hover:bg-slate-900/80 border-l-4 border-transparent'
+                }`}
+                title="HUMMİNGBOT BACKTEST - Canlı & Tarihsel Çoklu Ajan Simülasyonu"
+              >
+                <div className={`p-1.5 rounded-md shrink-0 ${mainView === 'backtest' ? 'bg-purple-500/20 text-purple-300' : 'bg-slate-900 text-purple-400 group-hover:text-purple-300'}`}>
+                  <FlaskConical className="w-4 h-4" />
+                </div>
+                {!isSidebarCollapsed && (
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="truncate">HUMMİNGBOT BACKTEST</span>
+                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-950 text-purple-300 border border-purple-800/60">PMM / AI</span>
+                    </div>
+                    <p className="text-[10px] text-slate-500 font-normal truncate mt-0.5">Çoklu Ajan & Simülasyon</p>
+                  </div>
+                )}
+              </button>
+
+              {/* 5. AJAN KONSEYİ */}
+              <button
+                onClick={() => setMainView('agents')}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold transition-all cursor-pointer group text-left ${
+                  mainView === 'agents'
+                    ? 'bg-gradient-to-r from-cyan-900/60 to-cyan-950/40 text-cyan-200 border-l-4 border-cyan-400 shadow-md shadow-cyan-950/50'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-900/80 border-l-4 border-transparent'
+                }`}
+                title="AJAN KONSEYİ - 11 Modelli Strateji Deski"
+              >
+                <div className={`p-1.5 rounded-md shrink-0 ${mainView === 'agents' ? 'bg-cyan-500/20 text-cyan-300' : 'bg-slate-900 text-slate-400 group-hover:text-cyan-300'}`}>
+                  <Bot className="w-4 h-4" />
+                </div>
+                {!isSidebarCollapsed && (
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="truncate">AJAN KONSEYİ</span>
+                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-800 text-cyan-300">11 Ajan</span>
+                    </div>
+                    <p className="text-[10px] text-slate-500 font-normal truncate mt-0.5">Konsensüs & Ağırlık Masası</p>
+                  </div>
+                )}
+              </button>
+
+              {/* 6. SİSTEM AYARLARI */}
+              <button
+                onClick={() => setMainView('settings')}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold transition-all cursor-pointer group text-left ${
+                  mainView === 'settings'
+                    ? 'bg-gradient-to-r from-cyan-900/60 to-cyan-950/40 text-cyan-200 border-l-4 border-cyan-400 shadow-md shadow-cyan-950/50'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-900/80 border-l-4 border-transparent'
+                }`}
+                title="AYARLAR - Risk, API, Telegram & Veritabanı"
+              >
+                <div className={`p-1.5 rounded-md shrink-0 ${mainView === 'settings' ? 'bg-cyan-500/20 text-cyan-300' : 'bg-slate-900 text-slate-400 group-hover:text-cyan-300'}`}>
+                  <Settings className="w-4 h-4" />
+                </div>
+                {!isSidebarCollapsed && (
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="truncate">SİSTEM AYARLARI</span>
+                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-400">Genel</span>
+                    </div>
+                    <p className="text-[10px] text-slate-500 font-normal truncate mt-0.5">Risk, API & Bildirimler</p>
+                  </div>
+                )}
+              </button>
+            </nav>
+          </div>
+
+          {/* Alt Kısım: Sistem Özet Kartı ve Daralt/Genişlet Butonu */}
+          <div className="p-2 border-t border-slate-800/80 bg-[#07090e]">
+            {!isSidebarCollapsed ? (
+              <div className="space-y-2">
+                <div className="p-2 rounded-lg bg-slate-900/90 border border-slate-800/80 text-[10.5px] font-mono space-y-1">
+                  <div className="flex items-center justify-between text-slate-400">
+                    <span>Motor:</span>
+                    <span className={`font-bold ${engineState === 'RUNNING' ? 'text-emerald-400' : 'text-slate-400'}`}>
+                      {engineState === 'RUNNING' ? '▶ ÇALIŞIYOR' : '⏹ DURDURULDU'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-slate-400">
+                    <span>Aktif Hesap:</span>
+                    <span className="font-bold text-cyan-300 truncate max-w-[100px]" title={activeAccount?.name}>
+                      {activeAccount?.name || 'Hesap Yok'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-slate-400">
+                    <span>Gecikme:</span>
+                    <span className="font-bold text-amber-300">{binanceLatency}ms</span>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => setIsSidebarCollapsed(true)}
+                  className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg bg-slate-900/80 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800 text-[11px] font-bold transition cursor-pointer"
+                  title="Menüyü Daralt"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                  <span>Menüyü Daralt</span>
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center gap-2">
+                <div className={`w-2.5 h-2.5 rounded-full ${wsConnected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} title="Bağlantı Durumu"></div>
+                <button
+                  onClick={() => setIsSidebarCollapsed(false)}
+                  className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-cyan-400 border border-slate-800 transition cursor-pointer"
+                  title="Menüyü Genişlet"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+          </div>
+        </aside>
+
+        {/* ========================================================
+            SAĞ ANA İÇERİK ALANI (Kaydırılabilir Görünümler)
+           ======================================================== */}
+        <div className="flex-1 overflow-y-auto flex flex-col min-w-0 bg-[#07090e]">
 
       {/* TOAST BİLDİRİMİ */}
       {statusMessage && (
@@ -3158,6 +3609,589 @@ export default function UnifiedQuantCockpit() {
       )}
 
       {/* ========================================================
+          GÖRÜNÜM 2.55: 100X ULTRA YÜKSEK KALDIRAÇLI SNİPER MASASI (HyperSniper 100x)
+         ======================================================== */}
+      {mainView === 'sniper100x' && (
+        <main className="flex-1 p-4 max-w-7xl mx-auto w-full space-y-4">
+
+          {/* Başlık ve Bilgi Çubuğu */}
+          <div className="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-2">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xl">⚡</span>
+                <h2 className="text-base font-black text-white uppercase tracking-wider">
+                  HyperSniper 100x Ultra Kaldıraçlı Scalp Masası
+                </h2>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-300 border border-rose-800 animate-pulse">
+                  100X İZOLE SCALP
+                </span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-950 text-purple-300 border border-purple-800">
+                  DİNAMİK FLİP (SAR)
+                </span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-800">
+                  SÜREKLİ TRAİLİNG STOP
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 mt-1">
+                Kısa vadeli mikro momentum kırılımlarında 100x pozisyon açar. Fiyat negatif yöne seyrederse kârla kapatıp anında ters yöne geçer (SAR). Sürekli iz süren stop ile kârı kilitler.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {sniperEngine?.is_running ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleInstantFlip}
+                    disabled={isLoadingSniper || !sniperEngine?.active_position}
+                    className="px-3 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-black text-xs uppercase tracking-wider flex items-center gap-1.5 cursor-pointer shadow-lg shadow-purple-950/50 disabled:opacity-50"
+                    title="Mevcut pozisyonu kârla kapatıp anında ters yöne aç"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>🔄 ANINDA TERSİNE ÇEVİR (FLIP)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleStopSniper(true)}
+                    disabled={isLoadingSniper}
+                    className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-black text-xs uppercase tracking-wider flex items-center gap-1.5 cursor-pointer shadow-lg shadow-rose-950/50 disabled:opacity-50"
+                  >
+                    <Square className="w-3.5 h-3.5 fill-current" />
+                    <span>⏹ MOTORU DURDUR</span>
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleStartSniper}
+                  disabled={isLoadingSniper}
+                  className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 cursor-pointer shadow-lg shadow-emerald-950/50 disabled:opacity-50"
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>🚀 100X MOTORU BAŞLAT</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Aksiyon Bildirimi Banner */}
+          {sniperActionMsg && (
+            <div className="p-2.5 rounded-lg bg-rose-950/80 border border-rose-800 text-rose-200 text-xs font-bold flex items-center gap-2 animate-in fade-in">
+              <Zap className="w-4 h-4 text-rose-400 shrink-0" />
+              <span>{sniperActionMsg}</span>
+            </div>
+          )}
+
+          {/* 5 KPI METRİK KARTI */}
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            {/* 1. Motor Durumu */}
+            <div className="p-3 rounded-xl bg-[#0b0e14] border border-slate-800 space-y-1">
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Motor Durumu</span>
+              <div className="flex items-center gap-2">
+                <span className={`w-2.5 h-2.5 rounded-full ${sniperEngine?.is_running ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`}></span>
+                <span className={`font-mono text-sm font-black ${sniperEngine?.is_running ? 'text-emerald-400' : 'text-slate-400'}`}>
+                  {sniperEngine?.is_running ? '100X ÇALIŞIYOR' : 'DURDURULDU'}
+                </span>
+              </div>
+              <span className="text-[10px] text-slate-500 block truncate">
+                {sniperEngine?.is_running ? `${sniperEngine.symbol} ${sniperEngine.leverage}x` : 'Başlatılmaya Hazır'}
+              </span>
+            </div>
+
+            {/* 2. Aktif Pozisyon */}
+            <div className="p-3 rounded-xl bg-[#0b0e14] border border-slate-800 space-y-1">
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Açık Pozisyon</span>
+              {sniperEngine?.active_position ? (
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <span className={`px-1.5 py-0.2 rounded text-[10px] font-black ${
+                      sniperEngine.active_position.side === 'LONG' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-rose-950 text-rose-400 border border-rose-800'
+                    }`}>
+                      {sniperEngine.active_position.side} {sniperEngine.active_position.leverage}x
+                    </span>
+                    <span className="font-mono text-xs font-bold text-white">${sniperEngine.active_position.current_price}</span>
+                  </div>
+                  <span className={`text-[10.5px] font-mono font-bold block mt-0.5 ${sniperEngine.active_position.roe_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {sniperEngine.active_position.pnl_usdt >= 0 ? '+' : ''}${sniperEngine.active_position.pnl_usdt} USDT ({sniperEngine.active_position.roe_pct >= 0 ? '+' : ''}{sniperEngine.active_position.roe_pct}%)
+                  </span>
+                </div>
+              ) : (
+                <div className="text-slate-500 font-mono text-xs font-bold mt-1">Açık Pozisyon Yok</div>
+              )}
+            </div>
+
+            {/* 3. Toplam Net PnL */}
+            <div className="p-3 rounded-xl bg-[#0b0e14] border border-slate-800 space-y-1">
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Kümülatif Net Kâr</span>
+              <div className={`font-mono text-sm font-black ${(sniperEngine?.total_pnl_usdt || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {(sniperEngine?.total_pnl_usdt || 0) >= 0 ? '+' : ''}${Number(sniperEngine?.total_pnl_usdt || 0).toFixed(2)} USDT
+              </div>
+              <span className="text-[10px] text-slate-400 block font-mono">
+                {sniperEngine?.win_count || 0} Kâr / {sniperEngine?.loss_count || 0} Zarar
+              </span>
+            </div>
+
+            {/* 4. Ters Yöne Dönüş (SAR) Döngüsü */}
+            <div className="p-3 rounded-xl bg-[#0b0e14] border border-slate-800 space-y-1">
+              <span className="text-[10px] text-purple-400 font-bold uppercase tracking-wider block">Dinamik SAR Flip</span>
+              <div className="font-mono text-sm font-black text-purple-300">
+                {sniperEngine?.successful_flips || 0} Başarılı Flip
+              </div>
+              <span className="text-[10px] text-slate-400 block font-mono">
+                Toplam {sniperEngine?.total_cycles || 0} Döngü
+              </span>
+            </div>
+
+            {/* 5. Trailing Stop Durumu */}
+            <div className="p-3 rounded-xl bg-[#0b0e14] border border-slate-800 space-y-1">
+              <span className="text-[10px] text-amber-400 font-bold uppercase tracking-wider block">Sürekli Trailing Stop</span>
+              <div className="font-mono text-xs font-black text-amber-300">
+                {sniperEngine?.active_position?.trailing_active ? '✅ KİLİTLİ (Aktif)' : '⏳ Eşik Bekleniyor'}
+              </div>
+              <span className="text-[10px] text-slate-400 block font-mono">
+                Adım: %{sniperTrailingStep} (100x'te %{(sniperTrailingStep * 100).toFixed(0)} ROE)
+              </span>
+            </div>
+          </div>
+
+          {/* 2 KOLONLU MASASI: AYARLAR & CANLI TELEMETRİ */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+            
+            {/* SOL KOLON (5 Kolon): 100X PARAMETRE VE AYAR KONSOLU */}
+            <div className="lg:col-span-5 space-y-3">
+              <div className="rounded-xl border border-slate-800 bg-[#0b0e14] p-4 space-y-4">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                  <h3 className="text-xs font-black text-white uppercase tracking-wider flex items-center gap-2">
+                    <Sliders className="w-3.5 h-3.5 text-rose-400" />
+                    100x Bot Strateji Parametreleri
+                  </h3>
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-rose-950 text-rose-400 font-mono border border-rose-800">
+                    ÖZEL AYARLAR
+                  </span>
+                </div>
+
+                {/* 1. Coin Seçimi (Hacim / Volume Kriteri) */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-300 flex items-center justify-between">
+                    <span>İşlem Yapılacak Coin (Hacim Kriteri):</span>
+                    <span className="text-[10px] font-mono text-cyan-400">
+                      {sniperSelectionMode === 'AUTO_VOLUME' ? '⚡ OTOMATİK EN YÜKSEK HACİM' : 'MANUEL'}
+                    </span>
+                  </label>
+
+                  <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setSniperSelectionMode('AUTO_VOLUME')}
+                      className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer text-center ${
+                        sniperSelectionMode === 'AUTO_VOLUME'
+                          ? 'bg-cyan-600 text-white shadow'
+                          : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                      }`}
+                    >
+                      ⚡ Otomatik En Likit (Sıfır Slippage)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSniperSelectionMode('MANUAL')}
+                      className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer text-center ${
+                        sniperSelectionMode === 'MANUAL'
+                          ? 'bg-cyan-600 text-white shadow'
+                          : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                      }`}
+                    >
+                      🎯 Manuel Parite Seç
+                    </button>
+                  </div>
+
+                  {sniperSelectionMode === 'MANUAL' && (
+                    <div className="grid grid-cols-3 gap-1.5 pt-1 font-mono text-xs">
+                      {['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'DOGEUSDT', 'PEPEUSDT', 'SUIUSDT'].map((sym) => (
+                        <button
+                          key={sym}
+                          type="button"
+                          onClick={() => setSniperSelectedSymbol(sym)}
+                          className={`p-1.5 rounded-lg font-bold transition cursor-pointer text-center ${
+                            sniperSelectedSymbol === sym
+                              ? 'bg-rose-600 text-white shadow'
+                              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                          }`}
+                        >
+                          {sym}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  <p className="text-[10.5px] text-slate-500 leading-normal pt-1 bg-slate-950/60 p-2 rounded border border-slate-800/80">
+                    💡 <b className="text-slate-400">Coin Seçim Kuralı:</b> 100x kaldıraçta tahta derinliği yetersiz coinlerde anlık kayma (slippage) tasfiye yaratabilir. Bu yüzden sistem 24h hacmi en yüksek (BTC, ETH, SOL, DOGE, PEPE) pariteleri önerir.
+                  </p>
+                </div>
+
+                {/* 2. Kaldıraç Oranı */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-bold text-slate-300">Kaldıraç Çarpanı:</span>
+                    <span className="font-mono font-black text-rose-400 text-sm">{sniperLeverage}x Kaldıraç</span>
+                  </div>
+                  <div className="grid grid-cols-5 gap-1 font-mono text-xs">
+                    {[20, 50, 75, 100, 125].map((lev) => (
+                      <button
+                        key={lev}
+                        type="button"
+                        onClick={() => setSniperLeverage(lev)}
+                        className={`py-1.5 rounded-lg font-bold transition cursor-pointer text-center ${
+                          sniperLeverage === lev
+                            ? 'bg-rose-600 text-white shadow'
+                            : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                        }`}
+                      >
+                        {lev}x
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 3. İşlem Başına Marjin */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-bold text-slate-300">İşlem Başına İzole Marjin ($ USDT):</span>
+                    <span className="font-mono font-bold text-emerald-400">${sniperMargin} USDT</span>
+                  </div>
+                  <div className="grid grid-cols-5 gap-1 font-mono text-xs">
+                    {[25, 50, 100, 250, 500].map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setSniperMargin(m)}
+                        className={`py-1.5 rounded-lg font-bold transition cursor-pointer text-center ${
+                          sniperMargin === m
+                            ? 'bg-emerald-600 text-white shadow'
+                            : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                        }`}
+                      >
+                        ${m}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-mono block">
+                    100x ile Açılacak Pozisyon Boyutu: <b>${sniperMargin * sniperLeverage} USDT</b>
+                  </span>
+                </div>
+
+                {/* 4. Otomatik Ters Yön Döngüsü (SAR - Auto Flip) */}
+                <div className="space-y-2 p-2.5 rounded-lg bg-slate-950/80 border border-slate-800">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-slate-200 flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={sniperAutoFlip}
+                        onChange={(e) => setSniperAutoFlip(e.target.checked)}
+                        className="rounded bg-slate-900 border-slate-700 text-purple-500 focus:ring-purple-400"
+                      />
+                      <span>Negatif Yöne Seyrederse Kârla Kapat & Tersine Aç (Döngü)</span>
+                    </label>
+                    <span className="px-1.5 py-0.5 rounded text-[9.5px] font-bold bg-purple-950 text-purple-300 border border-purple-800">
+                      SAR AKTİF
+                    </span>
+                  </div>
+                  <p className="text-[10.5px] text-slate-400 leading-normal">
+                    Fiyat lehimize gidip tepe yaptıktan sonra momentum terse dönerse, iz süren stopla kârı cebine koyar ve beklemeden anında ters yöne (LONG ⇄ SHORT) yeni 100x pozisyon açar.
+                  </p>
+                </div>
+
+                {/* 5. Sürekli İz Süren Stop (Trailing Step) */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-bold text-slate-300">Sürekli Trailing Stop Adımı:</span>
+                    <span className="font-mono font-bold text-amber-400">%{sniperTrailingStep} (%{(sniperTrailingStep * 100).toFixed(0)} ROE)</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5 font-mono text-xs">
+                    {[
+                      { step: 0.05, label: '%0.05 (Hızlı Mikro Kâr)' },
+                      { step: 0.08, label: '%0.08 (Dengeli Adım)' },
+                      { step: 0.12, label: '%0.12 (Geniş Dalga)' },
+                    ].map((t) => (
+                      <button
+                        key={t.step}
+                        type="button"
+                        onClick={() => setSniperTrailingStep(t.step)}
+                        className={`py-1.5 rounded-lg font-bold transition cursor-pointer text-center text-[10.5px] ${
+                          sniperTrailingStep === t.step
+                            ? 'bg-amber-600 text-white shadow'
+                            : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                        }`}
+                      >
+                        {t.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+            {/* SAĞ KOLON (7 Kolon): CANLI POZİSYON RADARI & İZ SÜREN STOP GÖRSELLEŞTİRİCİSİ */}
+            <div className="lg:col-span-7 space-y-3">
+              
+              {/* Canlı Pozisyon Kartı */}
+              <div className="rounded-xl border border-slate-800 bg-[#0b0e14] p-4 space-y-3">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                  <div className="flex items-center gap-2">
+                    <Activity className="w-4 h-4 text-cyan-400" />
+                    <h3 className="text-xs font-black text-white uppercase tracking-wider">
+                      100x Anlık Pozisyon Telemetrisi & Trailing Seviyesi
+                    </h3>
+                  </div>
+                  <span className="text-[10px] font-mono font-bold text-cyan-400 bg-cyan-950/80 px-2 py-0.5 rounded border border-cyan-800 flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
+                    <span>CANLI PİYASA ({binanceLatency}ms)</span>
+                  </span>
+                </div>
+
+                {sniperEngine?.active_position ? (
+                  <div className="space-y-3">
+                    <div className="p-3 rounded-lg bg-slate-950/80 border border-slate-800 flex items-center justify-between flex-wrap gap-2">
+                      <div className="flex items-center gap-3">
+                        <span className={`px-2.5 py-1 rounded-md text-xs font-black uppercase tracking-wider ${
+                          sniperEngine.active_position.side === 'LONG'
+                            ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/50'
+                            : 'bg-rose-500/20 text-rose-400 border border-rose-500/50'
+                        }`}>
+                          {sniperEngine.active_position.side} {sniperEngine.active_position.leverage}x
+                        </span>
+                        <div>
+                          <span className="text-sm font-black text-white font-mono">{sniperEngine.active_position.symbol}</span>
+                          <span className="text-[10px] text-slate-400 block font-mono">Döngü #{sniperEngine.active_position.cycle_id}</span>
+                        </div>
+                      </div>
+
+                      <div className="text-right">
+                        <div className={`text-base font-black font-mono ${sniperEngine.active_position.pnl_usdt >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {sniperEngine.active_position.pnl_usdt >= 0 ? '+' : ''}${sniperEngine.active_position.pnl_usdt} USDT
+                        </div>
+                        <span className={`text-xs font-mono font-bold ${sniperEngine.active_position.roe_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {sniperEngine.active_position.roe_pct >= 0 ? '+' : ''}{sniperEngine.active_position.roe_pct}% ROE
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Fiyatlar & Trailing Stop Barı */}
+                    <div className="grid grid-cols-3 gap-2 font-mono text-xs">
+                      <div className="p-2.5 rounded-lg bg-slate-900/60 border border-slate-800">
+                        <span className="text-[10px] text-slate-400 block">Giriş Fiyatı</span>
+                        <span className="font-bold text-white">${sniperEngine.active_position.entry_price}</span>
+                      </div>
+                      <div className="p-2.5 rounded-lg bg-slate-900/60 border border-slate-800">
+                        <span className="text-[10px] text-slate-400 block">Anlık Piyasa Fiyatı</span>
+                        <span className="font-bold text-cyan-300">${sniperEngine.active_position.current_price}</span>
+                      </div>
+                      <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-800/60">
+                        <span className="text-[10px] text-amber-300 block">Trailing Stop Seviyesi</span>
+                        <span className="font-bold text-amber-400">${Math.round(sniperEngine.active_position.trailing_stop_price * 100) / 100}</span>
+                      </div>
+                    </div>
+
+                    {/* Canlı Trailing Stop Görsel İlerleme Barı */}
+                    <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-1.5">
+                      <div className="flex items-center justify-between text-[11px] font-mono">
+                        <span className="text-slate-400">İz Süren Stop Güvenlik Koruması:</span>
+                        <span className={sniperEngine.active_position.trailing_active ? 'text-emerald-400 font-bold' : 'text-slate-400'}>
+                          {sniperEngine.active_position.trailing_active ? '🛡️ AKTİF KÂR KİLİTLENDİ' : 'Zirveye Göre İzleniyor...'}
+                        </span>
+                      </div>
+                      <div className="w-full bg-slate-800 h-2.5 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full transition-all duration-300 ${sniperEngine.active_position.roe_pct >= 0 ? 'bg-gradient-to-r from-emerald-500 to-cyan-400' : 'bg-rose-500'}`}
+                          style={{ width: `${Math.min(100, Math.max(10, Math.abs(sniperEngine.active_position.roe_pct)))}%` }}
+                        ></div>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="py-8 text-center space-y-2">
+                    <span className="text-3xl block">⏳</span>
+                    <p className="text-xs text-slate-400">Şu anda açık 100x pozisyon bulunmuyor.</p>
+                    <p className="text-[11px] text-slate-500">"100X MOTORU BAŞLAT" butonuna tıklayarak ilk döngüyü hemen başlatabilirsiniz.</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Binance 100x En Yüksek Hacimli Pariteler Tablosu */}
+              <div className="rounded-xl border border-slate-800 bg-[#0b0e14] overflow-hidden">
+                <div className="px-3 py-2 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between">
+                  <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                    <span>👑 Binance 100x Destekli En Likit Pariteler</span>
+                  </h4>
+                  <span className="text-[10px] text-slate-400 font-mono">Sıfır Slippage Filtresi</span>
+                </div>
+                <div className="overflow-x-auto max-h-[220px] overflow-y-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-950 text-slate-400 border-b border-slate-800 uppercase text-[9.5px] sticky top-0 font-semibold">
+                        <th className="p-2">Parite</th>
+                        <th className="p-2 text-right">Anlık Fiyat</th>
+                        <th className="p-2 text-center">Hacim Skoru</th>
+                        <th className="p-2 text-center">Max Kaldıraç</th>
+                        <th className="p-2">100x Uygunluk Değerlendirmesi</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60 font-mono text-[11px]">
+                      {sniperCoins.length === 0 ? (
+                        <tr><td colSpan="5" className="p-4 text-center text-slate-500">Pariteler yükleniyor...</td></tr>
+                      ) : (
+                        sniperCoins.map((c) => (
+                          <tr key={c.symbol} className="hover:bg-slate-900/40">
+                            <td className="p-2 font-bold text-white flex items-center gap-1.5">
+                              {c.is_recommended && <span title="Önerilen 100x Parite">⭐</span>}
+                              <span>{c.symbol}</span>
+                            </td>
+                            <td className="p-2 text-right font-bold text-cyan-300">${c.price}</td>
+                            <td className="p-2 text-center">
+                              <span className="px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-300 text-[10px] border border-cyan-800">
+                                {c.volume_category}
+                              </span>
+                            </td>
+                            <td className="p-2 text-center font-bold text-rose-400">{c.max_leverage}x</td>
+                            <td className="p-2 font-sans text-[10px] text-slate-400">{c.suitability_note}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          {/* ALT BÖLÜM: 100X AKTİVİTE & DÖNGÜ GÜNLÜĞÜ (Activity Log) */}
+          <div className="rounded-xl border border-slate-800 bg-[#0b0e14] overflow-hidden space-y-0">
+            <div className="p-3 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <Terminal className="w-4 h-4 text-purple-400" />
+                <h3 className="text-xs font-black text-white uppercase tracking-wider">
+                  Detaylı 100x Döngü & Ajan Aktivite Günlüğü ({activityLogs.length} Kayıt)
+                </h3>
+              </div>
+
+              <div className="flex items-center gap-2 text-xs">
+                {/* Modül Filtresi */}
+                <select
+                  value={logModuleFilter}
+                  onChange={(e) => setLogModuleFilter(e.target.value)}
+                  className="bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-300 font-mono text-xs"
+                >
+                  <option value="ALL">Tüm Modüller</option>
+                  <option value="SNIPER_100X">100x Sniper</option>
+                  <option value="BACKTEST">Backtest</option>
+                  <option value="FUNDING_ARB">Fonlama Arbitrajı</option>
+                  <option value="COUNCIL">Ajan Konseyi</option>
+                </select>
+
+                {/* Önem Filtresi */}
+                <select
+                  value={logSeverityFilter}
+                  onChange={(e) => setLogSeverityFilter(e.target.value)}
+                  className="bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-300 font-mono text-xs"
+                >
+                  <option value="ALL">Tüm Seviyeler</option>
+                  <option value="SUCCESS">Başarılı (Kâr / Flip)</option>
+                  <option value="INFO">Bilgilendirme</option>
+                  <option value="WARNING">İkaz / Stop</option>
+                  <option value="ERROR">Hatalar</option>
+                </select>
+
+                <button
+                  type="button"
+                  onClick={handleExportActivityLogsCsv}
+                  className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold transition cursor-pointer"
+                  title="Aktivite günlüğünü CSV olarak indir"
+                >
+                  📥 CSV İndir
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleClearActivityLogs}
+                  className="px-2.5 py-1 rounded bg-slate-800 hover:bg-rose-900/50 text-slate-400 hover:text-rose-300 transition cursor-pointer"
+                  title="Günlüğü Temizle"
+                >
+                  🗑 Temizle
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto max-h-[320px] overflow-y-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-slate-950 text-slate-400 border-b border-slate-800 uppercase text-[9.5px] sticky top-0 font-semibold font-mono">
+                    <th className="p-2.5">Zaman Damgası</th>
+                    <th className="p-2.5">Modül / Ajan</th>
+                    <th className="p-2.5">Parite</th>
+                    <th className="p-2.5 text-center">Eylem</th>
+                    <th className="p-2.5 text-right">Döngü PnL</th>
+                    <th className="p-2.5">Açıklama & Tetikleme Nedeni</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/50 font-mono text-[11px]">
+                  {activityLogs.length === 0 ? (
+                    <tr>
+                      <td colSpan="6" className="p-6 text-center text-slate-500 font-sans">
+                        Henüz aktivite kaydı bulunmuyor. Motor başlatıldığında veya backtest icra edildiğinde döngü kayıtları buraya düşecektir.
+                      </td>
+                    </tr>
+                  ) : (
+                    activityLogs.map((l) => (
+                      <tr key={l.id} className="hover:bg-slate-900/40">
+                        <td className="p-2.5 text-slate-400 text-[10.5px] whitespace-nowrap">
+                          {l.formatted_time || l.timestamp.slice(11, 23)}
+                        </td>
+                        <td className="p-2.5 font-bold text-white whitespace-nowrap">
+                          <span className={`px-1.5 py-0.5 rounded text-[9.5px] mr-1.5 ${
+                            l.module === 'SNIPER_100X' ? 'bg-rose-950 text-rose-300 border border-rose-800' :
+                            l.module === 'BACKTEST' ? 'bg-purple-950 text-purple-300 border border-purple-800' :
+                            'bg-cyan-950 text-cyan-300 border border-cyan-800'
+                          }`}>
+                            {l.module}
+                          </span>
+                          <span className="font-sans text-slate-300">{l.agent_name}</span>
+                        </td>
+                        <td className="p-2.5 text-slate-200 font-bold whitespace-nowrap">{l.symbol}</td>
+                        <td className="p-2.5 text-center whitespace-nowrap">
+                          <span className={`px-1.5 py-0.5 rounded text-[9.5px] font-bold ${
+                            l.action === 'FLIP' ? 'bg-purple-950 text-purple-300 border border-purple-700' :
+                            l.action === 'TRAILING_STOP' ? 'bg-amber-950 text-amber-300 border border-amber-700' :
+                            l.action === 'ENTRY' ? 'bg-cyan-950 text-cyan-300 border border-cyan-700' :
+                            l.action === 'EXIT' ? 'bg-emerald-950 text-emerald-300 border border-emerald-700' :
+                            l.action === 'ERROR' ? 'bg-rose-950 text-rose-300 border border-rose-700' :
+                            'bg-slate-800 text-slate-300'
+                          }`}>
+                            {l.action}
+                          </span>
+                        </td>
+                        <td className={`p-2.5 text-right font-bold whitespace-nowrap ${
+                          (l.pnl_usdt || 0) > 0 ? 'text-emerald-400' : (l.pnl_usdt || 0) < 0 ? 'text-rose-400' : 'text-slate-400'
+                        }`}>
+                          {l.pnl_usdt !== undefined ? `${l.pnl_usdt >= 0 ? '+' : ''}$${l.pnl_usdt} USDT` : '-'}
+                        </td>
+                        <td className="p-2.5 font-sans text-[11px] text-slate-300 leading-relaxed">
+                          {l.message}
+                          {l.error_details && <span className="text-rose-400 block text-[10px] mt-0.5 font-mono">{l.error_details}</span>}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </main>
+      )}
+
+      {/* ========================================================
           GÖRÜNÜM 2.6: HUMMINGBOT BACKTEST MASASI
          ======================================================== */}
       {mainView === 'backtest' && (
@@ -3493,6 +4527,21 @@ export default function UnifiedQuantCockpit() {
                 >
                   Gerçekleştirilen İşlemler ({(backtestResult.recent_trades || []).length})
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBacktestViewTab('activity_log');
+                    fetchActivityLogs();
+                  }}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+                    backtestViewTab === 'activity_log'
+                      ? 'bg-purple-600 text-white shadow'
+                      : 'bg-slate-900 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Terminal className="w-3.5 h-3.5" />
+                  <span>Detaylı Aktivite & Hata Günlüğü ({activityLogs.filter(l => l.module === 'BACKTEST').length})</span>
+                </button>
               </div>
 
               {/* SEKME 1: AJAN PERFORMANS DAĞILIMI */}
@@ -3572,6 +4621,92 @@ export default function UnifiedQuantCockpit() {
                       ))}
                     </tbody>
                   </table>
+                </div>
+              )}
+
+              {/* SEKME 3: DETAYLI AKTİVİTE & HATA GÜNLÜĞÜ (ACTIVITY LOG) */}
+              {backtestViewTab === 'activity_log' && (
+                <div className="rounded-xl border border-slate-800 bg-[#0b0e14] overflow-hidden space-y-0">
+                  <div className="p-3 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2">
+                      <Terminal className="w-4 h-4 text-purple-400" />
+                      <span className="text-xs font-bold text-white uppercase tracking-wider">
+                        Backtest & Kuant Ajanı İcra / Hata Kayıtları
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={handleExportActivityLogsCsv}
+                        className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold transition cursor-pointer"
+                      >
+                        📥 CSV İndir
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleClearActivityLogs}
+                        className="px-2.5 py-1 rounded bg-slate-800 hover:bg-rose-900/50 text-slate-400 hover:text-rose-300 transition cursor-pointer"
+                      >
+                        🗑 Günlüğü Temizle
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto max-h-[380px] overflow-y-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-950 text-slate-400 border-b border-slate-800 uppercase text-[9.5px] sticky top-0 font-semibold font-mono">
+                          <th className="p-2.5">Zaman Damgası</th>
+                          <th className="p-2.5">Ajan</th>
+                          <th className="p-2.5">Parite</th>
+                          <th className="p-2.5 text-center">Eylem</th>
+                          <th className="p-2.5 text-right">Döngü PnL</th>
+                          <th className="p-2.5">İcra Mesajı & Hata Detayları</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/50 font-mono text-[11px]">
+                        {activityLogs.filter(l => l.module === 'BACKTEST').length === 0 ? (
+                          <tr>
+                            <td colSpan="6" className="p-6 text-center text-slate-500 font-sans">
+                              Bu simülasyon oturumu için henüz aktivite kaydı bulunmuyor. "Backtest Başlat" butonuna tıklayarak yeni döngüleri kaydedebilirsiniz.
+                            </td>
+                          </tr>
+                        ) : (
+                          activityLogs.filter(l => l.module === 'BACKTEST').map((l) => (
+                            <tr key={l.id} className="hover:bg-slate-900/40">
+                              <td className="p-2.5 text-slate-400 text-[10.5px] whitespace-nowrap">
+                                {l.formatted_time || l.timestamp.slice(11, 23)}
+                              </td>
+                              <td className="p-2.5 font-bold text-purple-300 whitespace-nowrap font-sans">
+                                {l.agent_name}
+                              </td>
+                              <td className="p-2.5 text-slate-200 font-bold whitespace-nowrap">{l.symbol}</td>
+                              <td className="p-2.5 text-center whitespace-nowrap">
+                                <span className={`px-1.5 py-0.5 rounded text-[9.5px] font-bold ${
+                                  l.action === 'EXIT' ? 'bg-emerald-950 text-emerald-300 border border-emerald-700' :
+                                  l.action === 'STOP_LOSS' ? 'bg-rose-950 text-rose-300 border border-rose-700' :
+                                  l.action === 'ERROR' ? 'bg-rose-950 text-rose-300 border border-rose-700' :
+                                  'bg-cyan-950 text-cyan-300 border border-cyan-700'
+                                }`}>
+                                  {l.action}
+                                </span>
+                              </td>
+                              <td className={`p-2.5 text-right font-bold whitespace-nowrap ${
+                                (l.pnl_usdt || 0) > 0 ? 'text-emerald-400' : (l.pnl_usdt || 0) < 0 ? 'text-rose-400' : 'text-slate-400'
+                              }`}>
+                                {l.pnl_usdt !== undefined ? `${l.pnl_usdt >= 0 ? '+' : ''}$${l.pnl_usdt} (${l.pnl_pct || 0}%)` : '-'}
+                              </td>
+                              <td className="p-2.5 font-sans text-[11px] text-slate-300 leading-relaxed">
+                                {l.message}
+                                {l.error_details && <span className="text-rose-400 block text-[10px] mt-0.5 font-mono">{l.error_details}</span>}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
 
@@ -4319,6 +5454,9 @@ export default function UnifiedQuantCockpit() {
           </div>
         </main>
       )}
+
+        </div> {/* Kapanış: SAĞ ANA İÇERİK ALANI (flex-1 overflow-y-auto) */}
+      </div> {/* Kapanış: ANA GÖVDE (flex-1 flex overflow-hidden) */}
 
       {/* ========================================================
           HAFİF L2 DERİNLİK TAHTASI & BOT TAHMİN GEREKÇELERİ MODALI

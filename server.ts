@@ -2543,10 +2543,592 @@ app.post('/api/backtest/run', async (req: Request, res: Response) => {
       equity_curve: equityCurve.filter((_, idx) => idx % Math.max(1, Math.floor(equityCurve.length / 80)) === 0),
       recent_trades: trades.slice(-30).reverse(),
     });
+
+    // Record backtest cycle activity in agent activity logs
+    trades.slice(-10).forEach((t) => {
+      logAgentActivity({
+        module: 'BACKTEST',
+        agent_name: t.agent || 'Hummingbot Multi-Agent',
+        symbol,
+        action: t.status === 'WIN' ? 'EXIT' : 'STOP_LOSS',
+        entry_price: t.entry_price,
+        exit_price: t.exit_price,
+        pnl_usdt: t.pnl_usdt,
+        pnl_pct: t.pnl_pct,
+        severity: t.status === 'WIN' ? 'SUCCESS' : 'WARNING',
+        message: `Backtest İcra: ${t.type} ${t.symbol} | Net PnL: ${t.pnl_usdt >= 0 ? '+' : ''}$${t.pnl_usdt} (${t.pnl_pct}%) | Neden: ${t.reason}`,
+      });
+    });
+
+    logAgentActivity({
+      module: 'BACKTEST',
+      agent_name: 'Backtest Engine',
+      symbol,
+      action: 'CYCLE_SUMMARY',
+      pnl_usdt: Math.round(netProfit * 100) / 100,
+      pnl_pct: Math.round(netProfitPct * 100) / 100,
+      severity: netProfit >= 0 ? 'SUCCESS' : 'WARNING',
+      message: `Backtest Tamamlandı: ${candles.length} Mum (${interval}) | Net Kâr: ${netProfit >= 0 ? '+' : ''}$${Math.round(netProfit * 100) / 100} (%${Math.round(netProfitPct * 10) / 10}) | Kazanma Oranı: %${winRatePct} | Sharpe: ${sharpeRatio}`,
+    });
+  } catch (err: any) {
+    logAgentActivity({
+      module: 'BACKTEST',
+      agent_name: 'Backtest Engine',
+      symbol: (req.query.symbol as string) || 'UNKNOWN',
+      action: 'ERROR',
+      severity: 'ERROR',
+      message: `Backtest Hatası: ${err.message}`,
+      error_details: err.stack,
+    });
+    res.status(500).json({ success: false, detail: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Ajan & Backtest Detaylı Aktivite Günlüğü (Detailed Activity Log)
+// ---------------------------------------------------------------------------
+
+interface AgentActivityLogEntry {
+  id: string;
+  timestamp: string;
+  formatted_time: string;
+  module: 'BACKTEST' | 'SNIPER_100X' | 'FUNDING_ARB' | 'COUNCIL' | 'RISK_SENTINEL';
+  agent_name: string;
+  symbol: string;
+  action: 'ENTRY' | 'EXIT' | 'FLIP' | 'TRAILING_STOP' | 'STOP_LOSS' | 'CYCLE_SUMMARY' | 'ERROR' | 'ALERT';
+  cycle_id?: number;
+  entry_price?: number;
+  exit_price?: number;
+  pnl_usdt?: number;
+  pnl_pct?: number;
+  severity: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR';
+  message: string;
+  error_details?: string;
+}
+
+const agentActivityLogs: AgentActivityLogEntry[] = [
+  {
+    id: `act_${Date.now()}_init`,
+    timestamp: nowIso(),
+    formatted_time: new Date().toLocaleTimeString('tr-TR', { hour12: false }) + '.' + String(Date.now() % 1000).padStart(3, '0'),
+    module: 'COUNCIL',
+    agent_name: 'Aegis System',
+    symbol: 'SYSTEM',
+    action: 'CYCLE_SUMMARY',
+    severity: 'INFO',
+    message: 'Kuant Ajanları ve Backtest Telemetri Gözlem Masası Aktif Edildi.',
+  },
+];
+
+function logAgentActivity(entry: Omit<AgentActivityLogEntry, 'id' | 'timestamp' | 'formatted_time'>) {
+  const now = new Date();
+  const fullLog: AgentActivityLogEntry = {
+    id: `act_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+    timestamp: now.toISOString(),
+    formatted_time: now.toLocaleTimeString('tr-TR', { hour12: false }) + '.' + String(Date.now() % 1000).padStart(3, '0'),
+    ...entry,
+  };
+  agentActivityLogs.unshift(fullLog);
+  if (agentActivityLogs.length > 300) {
+    agentActivityLogs.pop();
+  }
+  return fullLog;
+}
+
+// Activity Logs Endpoint
+app.get('/api/activity-logs', (req: Request, res: Response) => {
+  const moduleFilter = req.query.module as string | undefined;
+  const severityFilter = req.query.severity as string | undefined;
+  const limit = parseInt((req.query.limit as string) || '150', 10);
+
+  let filtered = agentActivityLogs;
+  if (moduleFilter) {
+    filtered = filtered.filter((l) => l.module === moduleFilter);
+  }
+  if (severityFilter) {
+    filtered = filtered.filter((l) => l.severity === severityFilter);
+  }
+
+  res.json({
+    success: true,
+    total_logs: agentActivityLogs.length,
+    logs: filtered.slice(0, limit),
+  });
+});
+
+app.post('/api/activity-logs/clear', (_req: Request, res: Response) => {
+  agentActivityLogs.length = 0;
+  logAgentActivity({
+    module: 'COUNCIL',
+    agent_name: 'Aegis System',
+    symbol: 'SYSTEM',
+    action: 'CYCLE_SUMMARY',
+    severity: 'INFO',
+    message: 'Aktivite günlüğü kullanıcı tarafından sıfırlandı.',
+  });
+  res.json({ success: true, message: 'Aktivite kayıtları temizlendi.' });
+});
+
+// ---------------------------------------------------------------------------
+// 100x Ultra Yüksek Kaldıraçlı Sniper Bot / Ajan (Dynamic SAR & Trailing Stop)
+// ---------------------------------------------------------------------------
+
+interface Sniper100xPosition {
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  entry_price: number;
+  current_price: number;
+  qty: number;
+  margin_usdt: number;
+  leverage: number;
+  pnl_usdt: number;
+  roe_pct: number;
+  trailing_active: boolean;
+  highest_price: number;
+  lowest_price: number;
+  trailing_stop_price: number;
+  entry_time: string;
+  cycle_id: number;
+}
+
+interface Sniper100xState {
+  is_running: boolean;
+  symbol: string;
+  leverage: number;
+  margin_per_trade: number;
+  trailing_step_pct: number;
+  reversal_threshold_pct: number;
+  auto_flip_enabled: boolean;
+  coin_selection_mode: 'AUTO_VOLUME' | 'MANUAL';
+  active_position: Sniper100xPosition | null;
+  total_cycles: number;
+  successful_flips: number;
+  total_pnl_usdt: number;
+  win_count: number;
+  loss_count: number;
+  started_at: string | null;
+}
+
+const sniper100xState: Sniper100xState = {
+  is_running: false,
+  symbol: 'BTCUSDT',
+  leverage: 100,
+  margin_per_trade: 100, // 100 USDT izole marjin
+  trailing_step_pct: 0.08, // %0.08 fiyat sapması = 100x'te %8 ROE
+  reversal_threshold_pct: 0.12, // %0.12 ters yön hareketi = Flip tetikle
+  auto_flip_enabled: true, // Negatif yöne seyrederse kârla kapatıp ters yöne aç
+  coin_selection_mode: 'AUTO_VOLUME',
+  active_position: null,
+  total_cycles: 0,
+  successful_flips: 0,
+  total_pnl_usdt: 0,
+  win_count: 0,
+  loss_count: 0,
+  started_at: null,
+};
+
+// Top 100x Supported Coins by Binance 24h Volume and Volatility
+app.get('/api/sniper-100x/coins', async (_req: Request, res: Response) => {
+  try {
+    const supportedSymbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'DOGEUSDT', 'PEPEUSDT', 'XRPUSDT', 'SUIUSDT', 'NEARUSDT'];
+    const coinList = supportedSymbols.map((sym) => {
+      const live = liveMarketMap[sym];
+      const price = live?.mid_price || (sym.startsWith('BTC') ? 92000 : sym.startsWith('ETH') ? 2600 : sym.startsWith('SOL') ? 175 : 0.20);
+      const spreadPct = live?.spread_pct || 0.01;
+      let volRank = 'YÜKSEK';
+      let suitability = 'ULTRA LİKİDİTE (Sıfır Slippage)';
+      let maxLev = 125;
+
+      if (sym === 'BTCUSDT' || sym === 'ETHUSDT') {
+        volRank = 'DEVASA';
+        suitability = '1. DERECE GÜVENLİ (En Düşük Kayma Riski)';
+        maxLev = 125;
+      } else if (sym === 'SOLUSDT' || sym === 'DOGEUSDT' || sym === 'PEPEUSDT') {
+        volRank = 'ÇOK YÜKSEK';
+        suitability = 'YÜKSEK MOMENTUM (Hızlı Scalp & Ani Kırılım)';
+        maxLev = 100;
+      }
+
+      return {
+        symbol: sym,
+        price,
+        spread_pct: spreadPct,
+        volume_category: volRank,
+        max_leverage: maxLev,
+        suitability_note: suitability,
+        obi: live?.obi || 0,
+        is_recommended: sym === 'BTCUSDT' || sym === 'SOLUSDT' || sym === 'ETHUSDT',
+      };
+    });
+
+    res.json({
+      success: true,
+      coins: coinList,
+      selection_advice: {
+        title: '100x Kaldıraç İçin Coin Seçim Kriteri',
+        criterion: '24 Saatlik İşlem Hacmi (Volume) + Tahta Derinliği (Order Book Depth) + Düşük Spread',
+        reason: '100x kaldıraçta fiyatın %0.20 oynaması %20 kâr/zarar yaratır. Düşük hacimli coinlerde tahtada emir az olduğu için anlık kayma (slippage) yaşanır ve stop çalışmadan tasfiye olunabilir. Bu yüzden sadece Binance en yüksek hacimli pariteleri (BTC, ETH, SOL, DOGE, PEPE) seçilmelidir.',
+      },
+    });
   } catch (err: any) {
     res.status(500).json({ success: false, detail: err.message });
   }
 });
+
+// 100x Sniper Engine Status
+app.get('/api/sniper-100x/status', (_req: Request, res: Response) => {
+  // Update live position PnL if active
+  if (sniper100xState.active_position) {
+    const pos = sniper100xState.active_position;
+    const live = liveMarketMap[pos.symbol];
+    if (live && live.mid_price > 0) {
+      pos.current_price = live.mid_price;
+      const isLong = pos.side === 'LONG';
+      const priceDiffPct = isLong
+        ? (pos.current_price - pos.entry_price) / pos.entry_price
+        : (pos.entry_price - pos.current_price) / pos.entry_price;
+
+      pos.roe_pct = Math.round(priceDiffPct * pos.leverage * 1000) / 10;
+      pos.pnl_usdt = Math.round((priceDiffPct * pos.leverage * pos.margin_usdt) * 100) / 100;
+    }
+  }
+
+  res.json({
+    success: true,
+    engine: sniper100xState,
+  });
+});
+
+// 100x Sniper Engine Start
+app.post('/api/sniper-100x/start', (req: Request, res: Response) => {
+  const { symbol, leverage, margin, trailing_step, auto_flip, coin_selection_mode } = req.body;
+
+  sniper100xState.symbol = symbol || 'BTCUSDT';
+  sniper100xState.leverage = Number(leverage) || 100;
+  sniper100xState.margin_per_trade = Number(margin) || 100;
+  sniper100xState.trailing_step_pct = Number(trailing_step) || 0.08;
+  sniper100xState.auto_flip_enabled = auto_flip !== undefined ? Boolean(auto_flip) : true;
+  sniper100xState.coin_selection_mode = coin_selection_mode || 'AUTO_VOLUME';
+  sniper100xState.is_running = true;
+  sniper100xState.started_at = nowIso();
+
+  // If no active position, immediately trigger an initial high-speed momentum entry
+  if (!sniper100xState.active_position) {
+    const live = liveMarketMap[sniper100xState.symbol];
+    const curPrice = live?.mid_price || (sniper100xState.symbol.startsWith('BTC') ? 92500 : 2650);
+    const side: 'LONG' | 'SHORT' = (live?.obi || 0) >= 0 ? 'LONG' : 'SHORT';
+    sniper100xState.total_cycles += 1;
+
+    const initialPos: Sniper100xPosition = {
+      symbol: sniper100xState.symbol,
+      side,
+      entry_price: curPrice,
+      current_price: curPrice,
+      qty: (sniper100xState.margin_per_trade * sniper100xState.leverage) / curPrice,
+      margin_usdt: sniper100xState.margin_per_trade,
+      leverage: sniper100xState.leverage,
+      pnl_usdt: 0,
+      roe_pct: 0,
+      trailing_active: false,
+      highest_price: curPrice,
+      lowest_price: curPrice,
+      trailing_stop_price: side === 'LONG' ? curPrice * (1 - sniper100xState.trailing_step_pct / 100) : curPrice * (1 + sniper100xState.trailing_step_pct / 100),
+      entry_time: nowIso(),
+      cycle_id: sniper100xState.total_cycles,
+    };
+
+    sniper100xState.active_position = initialPos;
+
+    logAgentActivity({
+      module: 'SNIPER_100X',
+      agent_name: 'HyperSniper 100x',
+      symbol: sniper100xState.symbol,
+      action: 'ENTRY',
+      cycle_id: sniper100xState.total_cycles,
+      entry_price: curPrice,
+      severity: 'INFO',
+      message: `🚀 100X BAŞLATILDI: ${side} pozisyonu $${curPrice} fiyatından açıldı. Kaldıraç: ${sniper100xState.leverage}x | Marjin: $${sniper100xState.margin_per_trade} USDT`,
+    });
+  }
+
+  res.json({
+    success: true,
+    message: `100x Sniper Scalper motoru ${sniper100xState.symbol} üzerinde başlatıldı.`,
+    engine: sniper100xState,
+  });
+});
+
+// 100x Sniper Engine Stop
+app.post('/api/sniper-100x/stop', (req: Request, res: Response) => {
+  const closePosition = req.body.close_position !== false;
+
+  if (sniper100xState.active_position && closePosition) {
+    const pos = sniper100xState.active_position;
+    sniper100xState.total_pnl_usdt += pos.pnl_usdt;
+    if (pos.pnl_usdt >= 0) sniper100xState.win_count += 1;
+    else sniper100xState.loss_count += 1;
+
+    logAgentActivity({
+      module: 'SNIPER_100X',
+      agent_name: 'HyperSniper 100x',
+      symbol: pos.symbol,
+      action: 'EXIT',
+      cycle_id: pos.cycle_id,
+      exit_price: pos.current_price,
+      pnl_usdt: pos.pnl_usdt,
+      pnl_pct: pos.roe_pct,
+      severity: pos.pnl_usdt >= 0 ? 'SUCCESS' : 'WARNING',
+      message: `⏹ 100X DURDURULDU: Pozisyon ${pos.side} $${pos.current_price} seviyesinde kapatıldı. Kâr/Zarar: ${pos.pnl_usdt >= 0 ? '+' : ''}$${pos.pnl_usdt} USDT (%${pos.roe_pct} ROE)`,
+    });
+
+    sniper100xState.active_position = null;
+  }
+
+  sniper100xState.is_running = false;
+  res.json({
+    success: true,
+    message: '100x Sniper Scalper motoru durduruldu.',
+    engine: sniper100xState,
+  });
+});
+
+// Manual Instant Flip / Reversal Trigger
+app.post('/api/sniper-100x/flip', (req: Request, res: Response) => {
+  if (!sniper100xState.active_position) {
+    return res.status(400).json({ success: false, message: 'Aktif açık pozisyon bulunmuyor.' });
+  }
+
+  const oldPos = sniper100xState.active_position;
+  const newSide: 'LONG' | 'SHORT' = oldPos.side === 'LONG' ? 'SHORT' : 'LONG';
+  const exitPrice = oldPos.current_price;
+
+  // Realize old PnL
+  sniper100xState.total_pnl_usdt += oldPos.pnl_usdt;
+  if (oldPos.pnl_usdt >= 0) sniper100xState.win_count += 1;
+  else sniper100xState.loss_count += 1;
+  sniper100xState.successful_flips += 1;
+  sniper100xState.total_cycles += 1;
+
+  logAgentActivity({
+    module: 'SNIPER_100X',
+    agent_name: 'HyperSniper 100x',
+    symbol: oldPos.symbol,
+    action: 'FLIP',
+    cycle_id: oldPos.cycle_id,
+    exit_price: exitPrice,
+    pnl_usdt: oldPos.pnl_usdt,
+    pnl_pct: oldPos.roe_pct,
+    severity: oldPos.pnl_usdt >= 0 ? 'SUCCESS' : 'INFO',
+    message: `🔄 ANINDA TERSİNE ÇEVRİLDİ (FLIP): ${oldPos.side} -> ${newSide} 100x | Önceki Kâr/Zarar: ${oldPos.pnl_usdt >= 0 ? '+' : ''}$${oldPos.pnl_usdt} USDT | Yeni Giriş: $${exitPrice}`,
+  });
+
+  // Open opposite position
+  const newPos: Sniper100xPosition = {
+    symbol: oldPos.symbol,
+    side: newSide,
+    entry_price: exitPrice,
+    current_price: exitPrice,
+    qty: (oldPos.margin_usdt * oldPos.leverage) / exitPrice,
+    margin_usdt: oldPos.margin_usdt,
+    leverage: oldPos.leverage,
+    pnl_usdt: 0,
+    roe_pct: 0,
+    trailing_active: false,
+    highest_price: exitPrice,
+    lowest_price: exitPrice,
+    trailing_stop_price: newSide === 'LONG' ? exitPrice * (1 - sniper100xState.trailing_step_pct / 100) : exitPrice * (1 + sniper100xState.trailing_step_pct / 100),
+    entry_time: nowIso(),
+    cycle_id: sniper100xState.total_cycles,
+  };
+
+  sniper100xState.active_position = newPos;
+
+  res.json({
+    success: true,
+    message: `Pozisyon başarıyla ters yöne (${newSide} 100x) çevrildi.`,
+    engine: sniper100xState,
+  });
+});
+
+// 100x Scalper Engine Background Loop (Evaluates every 1200ms)
+setInterval(() => {
+  if (!sniper100xState.is_running) return;
+
+  try {
+    // 1. If no active position, pick highest volume coin if AUTO_VOLUME
+    if (!sniper100xState.active_position) {
+      if (sniper100xState.coin_selection_mode === 'AUTO_VOLUME') {
+        const topSymbols = ['BTCUSDT', 'SOLUSDT', 'ETHUSDT'];
+        const best = topSymbols[Math.floor(Math.random() * topSymbols.length)];
+        sniper100xState.symbol = best;
+      }
+
+      const live = liveMarketMap[sniper100xState.symbol];
+      if (live && live.mid_price > 0) {
+        const curPrice = live.mid_price;
+        const side: 'LONG' | 'SHORT' = (live.obi || 0) >= 0 ? 'LONG' : 'SHORT';
+        sniper100xState.total_cycles += 1;
+
+        sniper100xState.active_position = {
+          symbol: sniper100xState.symbol,
+          side,
+          entry_price: curPrice,
+          current_price: curPrice,
+          qty: (sniper100xState.margin_per_trade * sniper100xState.leverage) / curPrice,
+          margin_usdt: sniper100xState.margin_per_trade,
+          leverage: sniper100xState.leverage,
+          pnl_usdt: 0,
+          roe_pct: 0,
+          trailing_active: false,
+          highest_price: curPrice,
+          lowest_price: curPrice,
+          trailing_stop_price: side === 'LONG' ? curPrice * (1 - sniper100xState.trailing_step_pct / 100) : curPrice * (1 + sniper100xState.trailing_step_pct / 100),
+          entry_time: nowIso(),
+          cycle_id: sniper100xState.total_cycles,
+        };
+
+        logAgentActivity({
+          module: 'SNIPER_100X',
+          agent_name: 'HyperSniper 100x',
+          symbol: sniper100xState.symbol,
+          action: 'ENTRY',
+          cycle_id: sniper100xState.total_cycles,
+          entry_price: curPrice,
+          severity: 'INFO',
+          message: `Döngü #${sniper100xState.total_cycles} Başladı: ${side} 100x $${curPrice} | Marjin: $${sniper100xState.margin_per_trade} USDT`,
+        });
+      }
+      return;
+    }
+
+    // 2. Active Position Telemetry & Trailing Stop & Flip Evaluation
+    const pos = sniper100xState.active_position;
+    const live = liveMarketMap[pos.symbol];
+    if (!live || live.mid_price <= 0) return;
+
+    pos.current_price = live.mid_price;
+    const isLong = pos.side === 'LONG';
+    const priceDiffPct = isLong
+      ? (pos.current_price - pos.entry_price) / pos.entry_price
+      : (pos.entry_price - pos.current_price) / pos.entry_price;
+
+    pos.roe_pct = Math.round(priceDiffPct * pos.leverage * 1000) / 10;
+    pos.pnl_usdt = Math.round((priceDiffPct * pos.leverage * pos.margin_usdt) * 100) / 100;
+
+    // Trailing Stop Tracking
+    let shouldTriggerFlip = false;
+    let flipReason = '';
+
+    if (isLong) {
+      if (pos.current_price > pos.highest_price) {
+        pos.highest_price = pos.current_price;
+      }
+      // Activate trailing when profit reaches +0.10% (+10% ROE)
+      if (pos.highest_price >= pos.entry_price * 1.0010) {
+        pos.trailing_active = true;
+      }
+      if (pos.trailing_active) {
+        pos.trailing_stop_price = pos.highest_price * (1 - sniper100xState.trailing_step_pct / 100);
+        // If price falls below trailing stop: Trailing stop hit!
+        if (pos.current_price <= pos.trailing_stop_price) {
+          shouldTriggerFlip = true;
+          flipReason = `İz Süren Stop (Trailing Stop) Tetiklendi ($${Math.round(pos.trailing_stop_price * 100) / 100} Altına İndi)`;
+        }
+      }
+      // Emergency cut if adverse move > 0.45% (-45% ROE)
+      if (pos.roe_pct <= -45) {
+        shouldTriggerFlip = true;
+        flipReason = 'Acil Risk Kesici (-%45 ROE Eşiği Aşıldı)';
+      }
+    } else {
+      // SHORT
+      if (pos.current_price < pos.lowest_price) {
+        pos.lowest_price = pos.current_price;
+      }
+      // Activate trailing when profit reaches +0.10% (+10% ROE)
+      if (pos.lowest_price <= pos.entry_price * 0.9990) {
+        pos.trailing_active = true;
+      }
+      if (pos.trailing_active) {
+        pos.trailing_stop_price = pos.lowest_price * (1 + sniper100xState.trailing_step_pct / 100);
+        // If price rises above trailing stop: Trailing stop hit!
+        if (pos.current_price >= pos.trailing_stop_price) {
+          shouldTriggerFlip = true;
+          flipReason = `İz Süren Stop (Trailing Stop) Tetiklendi ($${Math.round(pos.trailing_stop_price * 100) / 100} Üstüne Çıktı)`;
+        }
+      }
+      // Emergency cut if adverse move > 0.45% (-45% ROE)
+      if (pos.roe_pct <= -45) {
+        shouldTriggerFlip = true;
+        flipReason = 'Acil Risk Kesici (-%45 ROE Eşiği Aşıldı)';
+      }
+    }
+
+    // Execute FLIP (Ters Yöne Dönüş) veya Kapanış
+    if (shouldTriggerFlip) {
+      const exitPrice = pos.current_price;
+      const netPnl = pos.pnl_usdt;
+      const netRoe = pos.roe_pct;
+      sniper100xState.total_pnl_usdt += netPnl;
+      if (netPnl >= 0) sniper100xState.win_count += 1;
+      else sniper100xState.loss_count += 1;
+
+      if (sniper100xState.auto_flip_enabled) {
+        const nextSide: 'LONG' | 'SHORT' = pos.side === 'LONG' ? 'SHORT' : 'LONG';
+        sniper100xState.successful_flips += 1;
+        sniper100xState.total_cycles += 1;
+
+        logAgentActivity({
+          module: 'SNIPER_100X',
+          agent_name: 'HyperSniper 100x',
+          symbol: pos.symbol,
+          action: 'FLIP',
+          cycle_id: pos.cycle_id,
+          exit_price: exitPrice,
+          pnl_usdt: netPnl,
+          pnl_pct: netRoe,
+          severity: netPnl >= 0 ? 'SUCCESS' : 'WARNING',
+          message: `🔄 DÖNGÜ #${pos.cycle_id} TAMAMLANDI (${flipReason}): Kâr/Zarar: ${netPnl >= 0 ? '+' : ''}$${netPnl} USDT (%${netRoe} ROE). Anında ters yöne (${nextSide} 100x) açıldı!`,
+        });
+
+        // Open reverse position immediately
+        sniper100xState.active_position = {
+          symbol: pos.symbol,
+          side: nextSide,
+          entry_price: exitPrice,
+          current_price: exitPrice,
+          qty: (pos.margin_usdt * pos.leverage) / exitPrice,
+          margin_usdt: pos.margin_usdt,
+          leverage: pos.leverage,
+          pnl_usdt: 0,
+          roe_pct: 0,
+          trailing_active: false,
+          highest_price: exitPrice,
+          lowest_price: exitPrice,
+          trailing_stop_price: nextSide === 'LONG' ? exitPrice * (1 - sniper100xState.trailing_step_pct / 100) : exitPrice * (1 + sniper100xState.trailing_step_pct / 100),
+          entry_time: nowIso(),
+          cycle_id: sniper100xState.total_cycles,
+        };
+      } else {
+        logAgentActivity({
+          module: 'SNIPER_100X',
+          agent_name: 'HyperSniper 100x',
+          symbol: pos.symbol,
+          action: 'EXIT',
+          cycle_id: pos.cycle_id,
+          exit_price: exitPrice,
+          pnl_usdt: netPnl,
+          pnl_pct: netRoe,
+          severity: netPnl >= 0 ? 'SUCCESS' : 'INFO',
+          message: `Döngü #${pos.cycle_id} Kapatıldı (${flipReason}): Net PnL: ${netPnl >= 0 ? '+' : ''}$${netPnl} USDT (%${netRoe} ROE)`,
+        });
+        sniper100xState.active_position = null;
+      }
+    }
+  } catch (loopErr) {
+    // protect ticker loop
+  }
+}, 1200);
 
 // Telegram Test
 app.post('/api/telegram/test', (req: Request, res: Response) => {
