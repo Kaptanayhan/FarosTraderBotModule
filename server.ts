@@ -34,6 +34,15 @@ interface Account {
   stop_mode: string;
   spot_vault_balance: number;
   vault_target: number;
+  leverage_cap?: number;
+  max_risk_pct?: number;
+  stop_loss_pct?: number;
+  take_profit_pct?: number;
+  trailing_stop_pct?: number;
+  breakeven_pct?: number;
+  last_sync_time?: string;
+  last_sync_status?: string;
+  last_sync_message?: string;
   created_at: string;
   updated_at: string;
 }
@@ -611,6 +620,155 @@ function computeIndicators(symbol: string, currentPrice: number) {
 // Account & Position Helpers
 // ---------------------------------------------------------------------------
 
+async function getBinanceServerTimeOffset(baseUrl: string): Promise<number> {
+  try {
+    const t0 = Date.now();
+    const res = await fetch(`${baseUrl}/fapi/v1/time`);
+    if (res.ok) {
+      const d = (await res.json()) as any;
+      if (d && d.serverTime) {
+        const roundTrip = Date.now() - t0;
+        return Number(d.serverTime) - (t0 + Math.floor(roundTrip / 2));
+      }
+    }
+  } catch (e) {
+    // fallback
+  }
+  return 0;
+}
+
+async function fetchBinanceLiveBalance(apiKey: string, apiSecret: string, testnet: boolean = false) {
+  const cleanKey = String(apiKey || '').trim();
+  const cleanSecret = String(apiSecret || '').trim();
+  if (!cleanKey || !cleanSecret) {
+    throw new Error('Binance API Key ve Secret zorunludur. Lütfen iki anahtarı da eksiksiz giriniz.');
+  }
+
+  const futuresBaseUrl = testnet ? 'https://testnet.binancefuture.com' : 'https://fapi.binance.com';
+  const timeOffset = await getBinanceServerTimeOffset(futuresBaseUrl);
+  const timestamp = Math.floor(Date.now() + timeOffset);
+  const queryString = `timestamp=${timestamp}&recvWindow=60000`;
+  const signature = crypto.createHmac('sha256', cleanSecret).update(queryString).digest('hex');
+  const futuresUrl = `${futuresBaseUrl}/fapi/v2/account?${queryString}&signature=${signature}`;
+
+  let futuresError: any = null;
+  try {
+    const res = await fetch(futuresUrl, {
+      method: 'GET',
+      headers: {
+        'X-MBX-APIKEY': cleanKey,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const data = (await res.json()) as any;
+    if (res.ok && (!data || data.code === undefined || data.code === 200)) {
+      let usdtWallet = 0;
+      let usdtAvailable = 0;
+      let usdtMargin = 0;
+      let usdtUnrealized = 0;
+
+      if (Array.isArray(data.assets)) {
+        const usdtAsset = data.assets.find((a: any) => a.asset === 'USDT');
+        if (usdtAsset) {
+          usdtWallet = parseFloat(usdtAsset.walletBalance) || 0;
+          usdtAvailable = parseFloat(usdtAsset.availableBalance) || 0;
+          usdtMargin = parseFloat(usdtAsset.marginBalance) || 0;
+          usdtUnrealized = parseFloat(usdtAsset.unrealizedProfit) || 0;
+        }
+      }
+
+      const totalWalletBalance = parseFloat(data.totalWalletBalance) || usdtWallet;
+      const totalMarginBalance = parseFloat(data.totalMarginBalance) || usdtMargin;
+      const availableBalance = parseFloat(data.availableBalance) || usdtAvailable;
+      const totalUnrealizedProfit = parseFloat(data.totalUnrealizedProfit) || usdtUnrealized;
+      const openPositions = Array.isArray(data.positions)
+        ? data.positions.filter((p: any) => parseFloat(p.positionAmt || '0') !== 0)
+        : [];
+
+      return {
+        wallet_type: 'FUTURES',
+        wallet_balance: Math.round(totalWalletBalance * 100) / 100,
+        available_balance: Math.round(availableBalance * 100) / 100,
+        margin_balance: Math.round(totalMarginBalance * 100) / 100,
+        unrealized_profit: Math.round(totalUnrealizedProfit * 100) / 100,
+        open_positions_count: openPositions.length,
+        positions: openPositions,
+        note: 'Binance Vadeli İşlemler (USDT-M Futures) cüzdanından canlı bakiye başarıyla çekildi.',
+      };
+    } else {
+      futuresError = data;
+    }
+  } catch (err: any) {
+    futuresError = { msg: err.message };
+  }
+
+  // If Futures failed (e.g. permission error -2015, Spot API key, or non-futures account), try Binance Spot API as fallback
+  if (!testnet) {
+    try {
+      const spotTimeRes = await fetch('https://api.binance.com/api/v3/time');
+      const spotTimeData = (await spotTimeRes.json()) as any;
+      const spotOffset = spotTimeData?.serverTime ? Number(spotTimeData.serverTime) - Date.now() : 0;
+      const spotTimestamp = Math.floor(Date.now() + spotOffset);
+      const spotQuery = `timestamp=${spotTimestamp}&recvWindow=60000`;
+      const spotSig = crypto.createHmac('sha256', cleanSecret).update(spotQuery).digest('hex');
+      const spotRes = await fetch(`https://api.binance.com/api/v3/account?${spotQuery}&signature=${spotSig}`, {
+        headers: { 'X-MBX-APIKEY': cleanKey },
+      });
+
+      if (spotRes.ok) {
+        const spotData = (await spotRes.json()) as any;
+        if (Array.isArray(spotData.balances)) {
+          const usdtBal = spotData.balances.find((b: any) => b.asset === 'USDT');
+          const freeUsdt = parseFloat(usdtBal?.free || '0');
+          const lockedUsdt = parseFloat(usdtBal?.locked || '0');
+          const totalUsdt = Math.round((freeUsdt + lockedUsdt) * 100) / 100;
+
+          return {
+            wallet_type: 'SPOT',
+            wallet_balance: totalUsdt,
+            available_balance: Math.round(freeUsdt * 100) / 100,
+            margin_balance: 0,
+            unrealized_profit: 0,
+            open_positions_count: 0,
+            positions: [],
+            note: 'Binance Spot cüzdanı bağlandı ($' + totalUsdt + ' USDT). Vadeli işlemler (Futures) için Binance API ayarlarınızdan "Enable Futures" iznini açmanız önerilir.',
+          };
+        }
+      }
+    } catch {
+      // Spot fallback attempt failed as well, proceed to detailed error formatting
+    }
+  }
+
+  // Produce clear, actionable Turkish error diagnostics based on Binance error code
+  const errCode = futuresError?.code;
+  const errMsg = futuresError?.msg || 'Bilinmeyen bağlantı hatası';
+
+  if (errCode === -2015) {
+    throw new Error(
+      'Binance Hatası (-2015): "Invalid API-key, IP, or permissions for action". ' +
+      'Çözüm: 1) Binance web sitesinde API Yönetimi -> API\'yi Düzenle -> "Vadeli İşlemleri Etkinleştir (Enable Futures)" kutucuğunu işaretleyin. ' +
+      '2) IP Kısıtlaması aktifse sunucu IP adresini ekleyin veya kısıtlamasız erişim verin. 3) API Key ve Secret\'ın doğruluğunu teyit edin.'
+    );
+  } else if (errCode === -1022) {
+    throw new Error(
+      'Binance Hatası (-1022): İmza doğrulanamadı (Signature not valid). ' +
+      'Lütfen API Secret anahtarını başında veya sonunda boşluk kalmayacak şekilde yeniden giriniz.'
+    );
+  } else if (errCode === -1021) {
+    throw new Error(
+      'Binance Hatası (-1021): Zaman uyuşmazlığı tespit edildi. Sunucu saati senkronize edildi, lütfen tekrar deneyiniz.'
+    );
+  } else if (errCode === -2014) {
+    throw new Error(
+      'Binance Hatası (-2014): API Key formatı geçersiz. Lütfen Binance tarafından verilen 64 karakterlik API Key anahtarını kontrol ediniz.'
+    );
+  } else {
+    throw new Error(`Binance API Hatası (${errCode ? 'Kod ' + errCode + ': ' : ''}${errMsg})`);
+  }
+}
+
 function enrichAccount(acc: Account) {
   const activePositions = positions.filter((p) => p.account_id === acc.id && p.status === 'OPEN');
   const usedMargin = activePositions.reduce((sum, p) => sum + p.margin, 0);
@@ -619,13 +777,23 @@ function enrichAccount(acc: Account) {
   const equity = Math.round((walletBalance + unrealizedPnl) * 100) / 100;
   const freeMargin = Math.max(0, Math.round((walletBalance - usedMargin) * 100) / 100);
 
+  const rawKey = acc.api_key ? acc.api_key.trim() : '';
+  const apiKeyMasked = rawKey.length > 8 ? rawKey.slice(0, 4) + '••••' + rawKey.slice(-4) : (rawKey ? '••••••••' : '');
+
   return {
     ...acc,
+    api_key_masked: apiKeyMasked,
+    has_api_secret: Boolean(acc.api_secret && acc.api_secret.trim().length > 0),
     wallet_balance: walletBalance,
     equity,
     used_margin: Math.round(usedMargin * 100) / 100,
     free_margin: freeMargin,
     unrealized_pnl: Math.round(unrealizedPnl * 100) / 100,
+    leverage_cap: acc.leverage_cap || parseInt(settings.leverage_cap || '5', 10),
+    max_risk_pct: acc.max_risk_pct || parseFloat(settings.max_risk_pct || '2.0'),
+    stop_loss_pct: acc.stop_loss_pct || parseFloat(settings.stop_loss_pct || '1.85'),
+    take_profit_pct: acc.take_profit_pct || parseFloat(settings.take_profit_pct || '4.50'),
+    trailing_stop_pct: acc.trailing_stop_pct || parseFloat(settings.trailing_stop_pct || '1.20'),
   };
 }
 
@@ -987,6 +1155,19 @@ app.get('/api/accounts', (req: Request, res: Response) => {
   res.json({ accounts: accounts.map(enrichAccount) });
 });
 
+app.get('/api/accounts/:id', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const acc = accounts.find((a) => a.id === id);
+  if (!acc) return res.status(404).json({ detail: 'Hesap bulunamadı' });
+  res.json({
+    account: {
+      ...enrichAccount(acc),
+      api_key: acc.api_key,
+      api_secret: acc.api_secret,
+    },
+  });
+});
+
 app.get(['/api/account', '/api/balance'], (req: Request, res: Response) => {
   const activeId = (req.query.account_id as string) || settings.active_account_id || 'acc_alpha';
   const acc = accounts.find((a) => a.id === activeId) || accounts[0];
@@ -1001,29 +1182,256 @@ app.get(['/api/account', '/api/balance'], (req: Request, res: Response) => {
   });
 });
 
-app.post('/api/accounts', (req: Request, res: Response) => {
-  const { name, type = 'PAPER', balance = 10000, api_key = '', api_secret = '', testnet = false } = req.body;
+app.post('/api/accounts', async (req: Request, res: Response) => {
+  const {
+    name,
+    type = 'PAPER',
+    balance = 10000,
+    api_key = '',
+    api_secret = '',
+    testnet = false,
+    leverage_cap = 5,
+    max_risk_pct = 2.0,
+    stop_loss_pct = 1.85,
+    take_profit_pct = 4.5,
+    trailing_stop_pct = 1.2,
+  } = req.body;
+
   const id = `acc_${crypto.randomBytes(4).toString('hex')}`;
+  let finalBalance = parseFloat(balance) || 10000;
+  let syncStatus = '';
+  let syncMsg = '';
+
+  const cleanApiKey = String(api_key || '').trim();
+  const cleanApiSecret = String(api_secret || '').trim();
+  const isReal = String(type).toUpperCase() === 'REAL';
+
+  if (isReal && cleanApiKey && cleanApiSecret) {
+    try {
+      const live = await fetchBinanceLiveBalance(cleanApiKey, cleanApiSecret, Boolean(testnet));
+      finalBalance = live.wallet_balance;
+      syncStatus = 'SUCCESS';
+      syncMsg = ` (Binance Canlı Bakiye: $${live.wallet_balance} USDT)`;
+    } catch (err: any) {
+      syncStatus = 'ERROR';
+      syncMsg = ` (Binance API uyarısı: ${err.message})`;
+    }
+  }
+
   const newAcc: Account = {
     id,
     name: String(name).trim() || 'Yeni Hesap',
-    type: String(type).toUpperCase(),
-    balance: parseFloat(balance) || 10000,
-    initial_balance: parseFloat(balance) || 10000,
-    api_key: String(api_key).trim(),
-    api_secret: String(api_secret).trim(),
+    type: isReal ? 'REAL' : 'PAPER',
+    balance: finalBalance,
+    initial_balance: finalBalance,
+    api_key: cleanApiKey,
+    api_secret: cleanApiSecret,
     testnet: Boolean(testnet),
     engine_state: 'STOPPED',
     stop_mode: '',
     spot_vault_balance: 0,
-    vault_target: (parseFloat(balance) || 10000) * 2,
+    vault_target: finalBalance * 2,
+    leverage_cap: parseInt(leverage_cap, 10) || 5,
+    max_risk_pct: parseFloat(max_risk_pct) || 2.0,
+    stop_loss_pct: parseFloat(stop_loss_pct) || 1.85,
+    take_profit_pct: parseFloat(take_profit_pct) || 4.5,
+    trailing_stop_pct: parseFloat(trailing_stop_pct) || 1.2,
+    last_sync_time: syncStatus ? nowIso() : '',
+    last_sync_status: syncStatus,
+    last_sync_message: syncMsg,
     created_at: nowIso(),
     updated_at: nowIso(),
   };
+
   accounts.push(newAcc);
   settings.active_account_id = id;
-  addLog(`Yeni hesap oluşturuldu: ${newAcc.name}`, 'INFO', 'ACCOUNT');
-  res.json({ success: true, account: enrichAccount(newAcc) });
+  addLog(`Yeni hesap oluşturuldu: ${newAcc.name}${syncMsg}`, 'INFO', 'ACCOUNT');
+  res.json({ success: true, account: enrichAccount(newAcc), message: `Hesap başarıyla oluşturuldu${syncMsg}` });
+});
+
+app.put('/api/accounts/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const acc = accounts.find((a) => a.id === id);
+  if (!acc) return res.status(404).json({ detail: 'Hesap bulunamadı' });
+
+  const {
+    name,
+    type,
+    balance,
+    api_key,
+    api_secret,
+    testnet,
+    leverage_cap,
+    max_risk_pct,
+    stop_loss_pct,
+    take_profit_pct,
+    trailing_stop_pct,
+    sync_live,
+  } = req.body;
+
+  if (name !== undefined) acc.name = String(name).trim();
+  if (type !== undefined) acc.type = String(type).toUpperCase();
+  if (balance !== undefined && !isNaN(balance)) acc.balance = parseFloat(balance);
+  if (api_key !== undefined) acc.api_key = String(api_key).trim();
+  if (api_secret !== undefined) acc.api_secret = String(api_secret).trim();
+  if (testnet !== undefined) acc.testnet = Boolean(testnet);
+  if (leverage_cap !== undefined) acc.leverage_cap = parseInt(leverage_cap, 10);
+  if (max_risk_pct !== undefined) acc.max_risk_pct = parseFloat(max_risk_pct);
+  if (stop_loss_pct !== undefined) acc.stop_loss_pct = parseFloat(stop_loss_pct);
+  if (take_profit_pct !== undefined) acc.take_profit_pct = parseFloat(take_profit_pct);
+  if (trailing_stop_pct !== undefined) acc.trailing_stop_pct = parseFloat(trailing_stop_pct);
+
+  acc.updated_at = nowIso();
+
+  let syncMsg = '';
+  if (acc.type === 'REAL' && acc.api_key && acc.api_secret && (sync_live || req.body.sync_balance)) {
+    try {
+      const liveBal = await fetchBinanceLiveBalance(acc.api_key, acc.api_secret, acc.testnet);
+      acc.balance = liveBal.wallet_balance;
+      acc.last_sync_time = nowIso();
+      acc.last_sync_status = 'SUCCESS';
+      acc.last_sync_message = `Bakiye çekildi: $${liveBal.wallet_balance} USDT`;
+      syncMsg = ` ve Binance bakiyesi ($${liveBal.wallet_balance} USDT) senkronize edildi`;
+    } catch (err: any) {
+      acc.last_sync_status = 'ERROR';
+      acc.last_sync_message = err.message;
+      syncMsg = ` (Uyarı: Binance bakiye çekilemedi: ${err.message})`;
+    }
+  }
+
+  addLog(`Hesap güncellendi: ${acc.name}${syncMsg}`, 'INFO', 'ACCOUNT');
+  res.json({ success: true, account: enrichAccount(acc), message: `Hesap güncellendi${syncMsg}` });
+});
+
+app.patch('/api/accounts/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const acc = accounts.find((a) => a.id === id);
+  if (!acc) return res.status(404).json({ detail: 'Hesap bulunamadı' });
+
+  const {
+    name,
+    type,
+    balance,
+    api_key,
+    api_secret,
+    testnet,
+    leverage_cap,
+    max_risk_pct,
+    stop_loss_pct,
+    take_profit_pct,
+    trailing_stop_pct,
+    sync_live,
+  } = req.body;
+
+  if (name !== undefined) acc.name = String(name).trim();
+  if (type !== undefined) acc.type = String(type).toUpperCase();
+  if (balance !== undefined && !isNaN(balance)) acc.balance = parseFloat(balance);
+  if (api_key !== undefined) acc.api_key = String(api_key).trim();
+  if (api_secret !== undefined) acc.api_secret = String(api_secret).trim();
+  if (testnet !== undefined) acc.testnet = Boolean(testnet);
+  if (leverage_cap !== undefined) acc.leverage_cap = parseInt(leverage_cap, 10);
+  if (max_risk_pct !== undefined) acc.max_risk_pct = parseFloat(max_risk_pct);
+  if (stop_loss_pct !== undefined) acc.stop_loss_pct = parseFloat(stop_loss_pct);
+  if (take_profit_pct !== undefined) acc.take_profit_pct = parseFloat(take_profit_pct);
+  if (trailing_stop_pct !== undefined) acc.trailing_stop_pct = parseFloat(trailing_stop_pct);
+
+  acc.updated_at = nowIso();
+
+  let syncMsg = '';
+  if (acc.type === 'REAL' && acc.api_key && acc.api_secret && (sync_live || req.body.sync_balance)) {
+    try {
+      const liveBal = await fetchBinanceLiveBalance(acc.api_key, acc.api_secret, acc.testnet);
+      acc.balance = liveBal.wallet_balance;
+      acc.last_sync_time = nowIso();
+      acc.last_sync_status = 'SUCCESS';
+      acc.last_sync_message = `Bakiye çekildi: $${liveBal.wallet_balance} USDT`;
+      syncMsg = ` ve Binance bakiyesi ($${liveBal.wallet_balance} USDT) senkronize edildi`;
+    } catch (err: any) {
+      acc.last_sync_status = 'ERROR';
+      acc.last_sync_message = err.message;
+      syncMsg = ` (Uyarı: Binance bakiye çekilemedi: ${err.message})`;
+    }
+  }
+
+  addLog(`Hesap güncellendi: ${acc.name}${syncMsg}`, 'INFO', 'ACCOUNT');
+  res.json({ success: true, account: enrichAccount(acc), message: `Hesap güncellendi${syncMsg}` });
+});
+
+app.post(['/api/accounts/test-credentials', '/api/accounts/:id/test-connection'], async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const acc = id ? accounts.find((a) => a.id === id) : null;
+  const apiKey = String(req.body.api_key || acc?.api_key || settings.binance_api_key || '').trim();
+  const apiSecret = String(req.body.api_secret || acc?.api_secret || settings.binance_api_secret || '').trim();
+  const testnet = req.body.testnet !== undefined ? Boolean(req.body.testnet) : Boolean(acc?.testnet);
+
+  if (!apiKey || !apiSecret) {
+    return res.status(400).json({
+      success: false,
+      detail: 'Binance API Key ve API Secret anahtarları boş olamaz. Lütfen iki anahtarı da giriniz.',
+    });
+  }
+
+  try {
+    const liveBal = await fetchBinanceLiveBalance(apiKey, apiSecret, testnet);
+    return res.json({
+      success: true,
+      message: `Bağlantı başarılı! ${liveBal.note || 'Binance bakiyesi doğrulandı.'}`,
+      details: liveBal,
+      wallet_balance: liveBal.wallet_balance,
+      available_balance: liveBal.available_balance,
+      margin_balance: liveBal.margin_balance,
+      unrealized_profit: liveBal.unrealized_profit,
+      open_positions_count: liveBal.open_positions_count,
+    });
+  } catch (err: any) {
+    return res.status(400).json({
+      success: false,
+      detail: err.message,
+    });
+  }
+});
+
+app.post('/api/accounts/:id/sync-balance', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const acc = accounts.find((a) => a.id === id);
+  if (!acc) return res.status(404).json({ detail: 'Hesap bulunamadı' });
+
+  const effectiveApiKey = String(acc.api_key || req.body.api_key || settings.binance_api_key || '').trim();
+  const effectiveApiSecret = String(acc.api_secret || req.body.api_secret || settings.binance_api_secret || '').trim();
+
+  if (!effectiveApiKey || !effectiveApiSecret) {
+    return res.status(400).json({
+      detail: 'Bu hesap için Binance API Key ve Secret tanımlanmamış! Lütfen Hesap Ayarları butonuna basarak API anahtarlarınızı kaydedin.',
+    });
+  }
+
+  // If account was missing keys, inherit them
+  if (!acc.api_key && effectiveApiKey) acc.api_key = effectiveApiKey;
+  if (!acc.api_secret && effectiveApiSecret) acc.api_secret = effectiveApiSecret;
+
+  try {
+    const liveBal = await fetchBinanceLiveBalance(effectiveApiKey, effectiveApiSecret, acc.testnet);
+    acc.balance = liveBal.wallet_balance;
+    acc.last_sync_time = nowIso();
+    acc.last_sync_status = 'SUCCESS';
+    acc.last_sync_message = `Binance bakiyesi başarıyla çekildi: $${liveBal.wallet_balance} USDT`;
+    acc.updated_at = nowIso();
+
+    addLog(`[BİNANCE SENKRONİZE] ${acc.name} bakiyesi güncellendi: $${liveBal.wallet_balance} USDT (${liveBal.wallet_type})`, 'INFO', 'ACCOUNT');
+    res.json({
+      success: true,
+      balance: liveBal.wallet_balance,
+      account: enrichAccount(acc),
+      details: liveBal,
+      message: `Binance bakiyesi başarıyla çekildi: $${liveBal.wallet_balance.toFixed(2)} USDT (Kullanılabilir: $${liveBal.available_balance.toFixed(2)} USDT)`,
+    });
+  } catch (err: any) {
+    acc.last_sync_time = nowIso();
+    acc.last_sync_status = 'ERROR';
+    acc.last_sync_message = err.message;
+    addLog(`[BİNANCE HATA] ${acc.name} bakiye çekme hatası: ${err.message}`, 'WARN', 'ACCOUNT');
+    res.status(400).json({ success: false, detail: err.message });
+  }
 });
 
 app.post('/api/accounts/active', (req: Request, res: Response) => {
@@ -1037,12 +1445,20 @@ app.post('/api/accounts/active', (req: Request, res: Response) => {
 
 app.delete('/api/accounts/:id', (req: Request, res: Response) => {
   const { id } = req.params;
+  if (accounts.length <= 1) {
+    return res.status(400).json({ detail: 'En az bir hesap bulunmalıdır. Tek hesabı silemezsiniz.' });
+  }
   const index = accounts.findIndex((a) => a.id === id);
   if (index === -1) return res.status(404).json({ detail: 'Hesap bulunamadı' });
-  accounts.splice(index, 1);
+  const [deleted] = accounts.splice(index, 1);
+  positions = positions.filter((p) => p.account_id !== id);
+  orders = orders.filter((o) => o.account_id !== id);
+  trades = trades.filter((t) => t.account_id !== id);
+
   if (settings.active_account_id === id) {
     settings.active_account_id = accounts[0]?.id || '';
   }
+  addLog(`Hesap silindi: ${deleted.name}`, 'WARN', 'ACCOUNT');
   res.json({ success: true, active_account_id: settings.active_account_id });
 });
 

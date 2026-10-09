@@ -77,6 +77,11 @@ export default function UnifiedQuantCockpit() {
     setStatusMessage,
     selectAccount,
     updateAccountBalance,
+    syncAccountBalance,
+    testAccountCredentials,
+    editAccount,
+    deleteAccount,
+    addAccount,
     startEngine,
     stopEngine,
     fetchAccounts,
@@ -211,6 +216,23 @@ export default function UnifiedQuantCockpit() {
   const [newAccApiSecret, setNewAccApiSecret] = useState('');
   const [newAccTestnet, setNewAccTestnet] = useState(false);
   const [isAddingAcc, setIsAddingAcc] = useState(false);
+
+  // Edit Account & Per-Account Settings Modal State
+  const [editingAccount, setEditingAccount] = useState(null);
+  const [accountModalTab, setAccountModalTab] = useState('general'); // 'general' | 'api' | 'risk'
+  const [isSavingAccount, setIsSavingAccount] = useState(false);
+  const [isSyncingLiveAccount, setIsSyncingLiveAccount] = useState(false);
+  const [syncingAccountId, setSyncingAccountId] = useState(null);
+  const [accountSyncResult, setAccountSyncResult] = useState(null);
+  const [showEditSecret, setShowEditSecret] = useState(false);
+  const [isTestingCredentials, setIsTestingCredentials] = useState(false);
+  const [testCredentialsResult, setTestCredentialsResult] = useState(null);
+
+  // Delete Account Confirmation Modal State
+  const [accountToDelete, setAccountToDelete] = useState(null);
+
+  // Add Account Modal State
+  const [isAddAccountModalOpen, setIsAddAccountModalOpen] = useState(false);
 
   // Settings Categories in Settings View: 'risk' | 'api' | 'telegram' | 'auth' | 'updates'
   const [settingsCategory, setSettingsCategory] = useState('risk');
@@ -506,26 +528,21 @@ export default function UnifiedQuantCockpit() {
     if (!newAccName.trim()) return;
     setIsAddingAcc(true);
     try {
-      const res = await fetch(`${API_BASE}/api/accounts`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: newAccName.trim(),
-          type: newAccType,
-          balance: parseFloat(newAccBalance) || 10000,
-          api_key: newAccApiKey.trim(),
-          api_secret: newAccApiSecret.trim(),
-          testnet: newAccTestnet,
-        })
+      const res = await addAccount({
+        name: newAccName.trim(),
+        type: newAccType,
+        balance: parseFloat(newAccBalance) || 10000,
+        api_key: newAccApiKey.trim(),
+        api_secret: newAccApiSecret.trim(),
+        testnet: newAccTestnet,
       });
-      if (res.ok) {
-        const d = await res.json();
-        fetchAccounts();
-        selectAccount(d.account.id);
+      if (res.success) {
         setNewAccName('');
         setNewAccApiKey('');
         setNewAccApiSecret('');
         setStatusMessage('Yeni hesap başarıyla eklendi.');
+      } else {
+        alert(res.error || 'Hesap eklenemedi');
       }
     } catch (err) {
       console.error('Add account error:', err);
@@ -534,15 +551,150 @@ export default function UnifiedQuantCockpit() {
     }
   };
 
-  const handleDeleteAccount = async (accId) => {
-    if (!confirm('Bu hesabı silmek istediğinize emin misiniz?')) return;
+  const handleDeleteAccount = (accId) => {
+    if ((accounts || []).length <= 1) {
+      alert('Sistemde en az bir hesap bulunmalıdır. Tek hesabı silemezsiniz.');
+      return;
+    }
+    const target = (accounts || []).find(a => a.id === accId);
+    if (target) {
+      setAccountToDelete(target);
+    }
+  };
+
+  const handleConfirmDeleteAccount = async () => {
+    if (!accountToDelete) return;
+    if ((accounts || []).length <= 1) {
+      alert('Sistemde en az bir hesap bulunmalıdır. Tek hesabı silemezsiniz.');
+      setAccountToDelete(null);
+      return;
+    }
     try {
-      const res = await fetch(`${API_BASE}/api/accounts/${accId}`, { method: 'DELETE' });
-      if (res.ok) {
-        fetchAccounts();
+      const ok = await deleteAccount(accountToDelete.id);
+      if (ok) {
+        setStatusMessage(`'${accountToDelete.name}' hesabı başarıyla silindi.`);
+        if (editingAccount?.id === accountToDelete.id) {
+          setEditingAccount(null);
+        }
       }
     } catch (err) {
       console.error('Delete account error:', err);
+    } finally {
+      setAccountToDelete(null);
+    }
+  };
+
+  const handleOpenEditAccount = async (acc) => {
+    if (!acc) return;
+    setAccountSyncResult(null);
+    setTestCredentialsResult(null);
+    setShowEditSecret(false);
+    setAccountModalTab('general');
+    try {
+      const res = await fetch(`${API_BASE}/api/accounts/${acc.id}`);
+      if (res.ok) {
+        const d = await res.json();
+        setEditingAccount(d.account || acc);
+      } else {
+        setEditingAccount({ ...acc });
+      }
+    } catch {
+      setEditingAccount({ ...acc });
+    }
+  };
+
+  const handleTestCredentials = async () => {
+    if (!editingAccount) return;
+    setIsTestingCredentials(true);
+    setTestCredentialsResult(null);
+    try {
+      const res = await testAccountCredentials({
+        api_key: editingAccount.api_key,
+        api_secret: editingAccount.api_secret,
+        testnet: editingAccount.testnet
+      });
+      if (res.success) {
+        setTestCredentialsResult({
+          type: 'success',
+          message: res.message || 'Binance bağlantısı başarıyla kuruldu!',
+          wallet_balance: res.wallet_balance,
+          available_balance: res.available_balance,
+          margin_balance: res.margin_balance,
+          unrealized_profit: res.unrealized_profit,
+          details: res.details
+        });
+        if (res.wallet_balance !== undefined) {
+          setEditingAccount(prev => ({ ...prev, balance: res.wallet_balance }));
+        }
+      } else {
+        setTestCredentialsResult({
+          type: 'error',
+          message: res.detail || 'Binance bağlantısı kurulamadı. API anahtarlarınızı kontrol edin.'
+        });
+      }
+    } catch (err) {
+      setTestCredentialsResult({
+        type: 'error',
+        message: err.message
+      });
+    } finally {
+      setIsTestingCredentials(false);
+    }
+  };
+
+  const handleSaveAccountSettings = async (andSyncLive = false) => {
+    if (!editingAccount) return;
+    setIsSavingAccount(true);
+    setAccountSyncResult(null);
+    try {
+      const res = await editAccount(editingAccount.id, {
+        ...editingAccount,
+        sync_live: Boolean(andSyncLive)
+      });
+      if (res.success) {
+        setAccountSyncResult({
+          type: 'success',
+          text: andSyncLive
+            ? '✅ Hesap ayarları kaydedildi ve Binance bakiyesi senkronize edildi!'
+            : '✅ Hesap ayarları başarıyla kaydedildi!'
+        });
+        fetchAccounts();
+        setTimeout(() => setEditingAccount(null), 1500);
+      } else {
+        setAccountSyncResult({ type: 'error', text: `❌ ${res.error || 'Kaydedilemedi'}` });
+      }
+    } catch (err) {
+      setAccountSyncResult({ type: 'error', text: `❌ Hata: ${err.message}` });
+    } finally {
+      setIsSavingAccount(false);
+    }
+  };
+
+  const handleSyncAccountBalance = async (accId) => {
+    setSyncingAccountId(accId);
+    setIsSyncingLiveAccount(true);
+    setAccountSyncResult(null);
+    try {
+      const res = await syncAccountBalance(accId);
+      if (res.success) {
+        setAccountSyncResult({
+          type: 'success',
+          text: `✅ Binance Canlı Bakiyesi Çekildi: $${Number(res.balance).toFixed(2)} USDT`
+        });
+        if (editingAccount && editingAccount.id === accId) {
+          setEditingAccount(prev => ({ ...prev, balance: res.balance }));
+        }
+      } else {
+        setAccountSyncResult({
+          type: 'error',
+          text: `❌ Binance Hatası: ${res.error}`
+        });
+      }
+    } catch (err) {
+      setAccountSyncResult({ type: 'error', text: `❌ Bağlantı hatası: ${err.message}` });
+    } finally {
+      setIsSyncingLiveAccount(false);
+      setSyncingAccountId(null);
     }
   };
 
@@ -1233,8 +1385,8 @@ export default function UnifiedQuantCockpit() {
             </div>
           </div>
 
-          {/* Dinamik Hesap Seçici Dropdown */}
-          <div className="relative">
+          {/* Dinamik Hesap Seçici Dropdown & Ayarlar Kısayolu */}
+          <div className="flex items-center gap-1.5">
             <select
               value={activeAccount?.id || ''}
               onChange={(e) => selectAccount(e.target.value)}
@@ -1246,6 +1398,31 @@ export default function UnifiedQuantCockpit() {
                 </option>
               ))}
             </select>
+
+            <button
+              onClick={() => handleOpenEditAccount(activeAccount)}
+              className="p-1.5 rounded bg-slate-900 hover:bg-cyan-900/60 text-slate-300 hover:text-cyan-300 border border-slate-700/80 transition cursor-pointer flex items-center gap-1"
+              title="Aktif Hesabın Ayarları ve Binance Canlı Bakiye Senkronizasyonu"
+            >
+              <Settings className="w-3.5 h-3.5 text-cyan-400" />
+            </button>
+
+            <button
+              onClick={() => activeAccount && handleSyncAccountBalance(activeAccount.id)}
+              disabled={syncingAccountId === activeAccount?.id}
+              className={`p-1.5 rounded bg-slate-900 hover:bg-amber-900/40 text-amber-400 hover:text-amber-300 border border-slate-700/80 transition cursor-pointer flex items-center gap-1 ${syncingAccountId === activeAccount?.id ? 'opacity-70' : ''}`}
+              title="Aktif Hesabın Gerçek Binance Bakiyesini Çek & Senkronize Et"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${syncingAccountId === activeAccount?.id ? 'animate-spin text-amber-300' : ''}`} />
+            </button>
+
+            <button
+              onClick={() => setIsAddAccountModalOpen(true)}
+              className="p-1.5 rounded bg-slate-900 hover:bg-emerald-900/40 text-emerald-400 hover:text-emerald-300 border border-slate-700/80 transition cursor-pointer flex items-center gap-1"
+              title="Yeni Hesap Ekle (Sanal veya Gerçek Binance)"
+            >
+              <UserPlus className="w-3.5 h-3.5 text-emerald-400" />
+            </button>
           </div>
 
           {/* SIFIRLA / SENKRONİZE ET BUTONU */}
@@ -2138,27 +2315,51 @@ export default function UnifiedQuantCockpit() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {(accounts || []).map(acc => {
               const isActive = activeAccount?.id === acc.id;
               const isRunning = acc.engine_state === 'RUNNING';
+              const isSyncingThis = syncingAccountId === acc.id;
               return (
                 <div
                   key={acc.id}
                   className={`p-4 rounded-xl border transition relative overflow-hidden flex flex-col justify-between ${
                     isActive
-                      ? 'bg-[#0f172a]/90 border-cyan-500/80 shadow-lg shadow-cyan-950/40'
+                      ? 'bg-[#0f172a]/95 border-cyan-500/80 shadow-xl shadow-cyan-950/40 ring-1 ring-cyan-500/30'
                       : 'bg-[#0b0e14] border-slate-800 hover:border-slate-700'
                   }`}
                 >
                   <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                        acc.type === 'REAL' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-cyan-950 text-cyan-400 border border-cyan-800'
-                      }`}>
-                        {acc.type === 'REAL' ? 'GERÇEK BİNANCE API' : 'SANAL TESTNET'}
-                      </span>
-                      <span className={`flex items-center gap-1 text-[10px] font-bold ${
+                    {/* Üst Rozetler: Hesap Türü, API Durumu ve Motor Durumu */}
+                    <div className="flex items-center justify-between gap-1.5 flex-wrap mb-2.5">
+                      <div className="flex items-center gap-1.5">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          acc.type === 'REAL' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-cyan-950 text-cyan-400 border border-cyan-800'
+                        }`}>
+                          {acc.type === 'REAL' ? '🟢 GERÇEK BİNANCE' : '🧪 SANAL (PAPER)'}
+                        </span>
+                        {acc.testnet && (
+                          <span className="px-1.5 py-0.5 rounded text-[9.5px] font-mono bg-amber-950 text-amber-300 border border-amber-800">
+                            TESTNET
+                          </span>
+                        )}
+                        {acc.last_sync_status === 'SUCCESS' ? (
+                          <span className="px-1.5 py-0.5 rounded text-[9.5px] font-mono bg-emerald-950/80 text-emerald-300 border border-emerald-700/80 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                            <span>BAĞLI</span>
+                          </span>
+                        ) : acc.last_sync_status === 'ERROR' ? (
+                          <span className="px-1.5 py-0.5 rounded text-[9.5px] font-mono bg-rose-950/80 text-rose-300 border border-rose-700/80" title={acc.last_sync_message}>
+                            ⚠️ API HATASI
+                          </span>
+                        ) : acc.type === 'REAL' && (!acc.api_key || !acc.api_secret) ? (
+                          <span className="px-1.5 py-0.5 rounded text-[9.5px] font-mono bg-amber-950/80 text-amber-300 border border-amber-700/80">
+                            🔑 API BEKLİYOR
+                          </span>
+                        ) : null}
+                      </div>
+
+                      <span className={`flex items-center gap-1 text-[10.5px] font-bold ${
                         isRunning ? 'text-emerald-400' : 'text-slate-500'
                       }`}>
                         <span className={`w-2 h-2 rounded-full ${isRunning ? 'bg-emerald-400 animate-ping' : 'bg-slate-600'}`}></span>
@@ -2166,40 +2367,136 @@ export default function UnifiedQuantCockpit() {
                       </span>
                     </div>
 
-                    <h3 className="font-bold text-sm text-white">{acc.name}</h3>
-                    <div className="mt-3 font-mono">
-                      <span className="text-slate-400 text-xs">Mevcut Bakiye:</span>
-                      <div className="text-xl font-black text-amber-400">
-                        ${Number(acc.balance || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT
+                    {/* Hesap Başlığı ve Düzenleme İkonu */}
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-bold text-sm text-white flex items-center gap-1.5">
+                        <span>{acc.name}</span>
+                        {isActive && (
+                          <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-cyan-950 text-cyan-300 border border-cyan-700">
+                            AKTİF
+                          </span>
+                        )}
+                      </h3>
+                      <button
+                        onClick={() => handleOpenEditAccount(acc)}
+                        className="p-1 rounded text-slate-400 hover:text-cyan-300 hover:bg-slate-800 transition cursor-pointer"
+                        title="Bu Hesabın Ayarlarını Düzenle"
+                      >
+                        <Edit2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    {/* Bakiye Göstergesi */}
+                    <div className="mt-2.5 font-mono bg-slate-950/70 p-2.5 rounded-lg border border-slate-800/80">
+                      <div className="flex items-center justify-between text-xs text-slate-400 mb-0.5">
+                        <span>Cüzdan Bakiyesi:</span>
+                        {acc.last_sync_time && (
+                          <span className="text-[10px] text-slate-500">
+                            Son senk: {acc.last_sync_time.slice(11, 16)}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xl font-black text-amber-400 flex items-baseline justify-between">
+                        <span>${Number(acc.balance || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        <span className="text-xs text-slate-400 font-sans font-semibold">USDT</span>
+                      </div>
+
+                      {/* Alt Metrikler: Kullanılabilir, Teminat, PnL, Kaldıraç */}
+                      <div className="grid grid-cols-2 gap-2 mt-2 pt-2 border-t border-slate-800/70 text-[10.5px]">
+                        <div>
+                          <span className="text-slate-500 block">Kullanılabilir:</span>
+                          <span className="text-slate-200 font-bold">${Number(acc.free_margin ?? acc.balance ?? 0).toFixed(2)}</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block">Kullanılan Teminat:</span>
+                          <span className="text-amber-300 font-bold">${Number(acc.used_margin || 0).toFixed(2)}</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block">Açık PnL:</span>
+                          <span className={`font-bold ${Number(acc.unrealized_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {Number(acc.unrealized_pnl || 0) >= 0 ? '+' : ''}${Number(acc.unrealized_pnl || 0).toFixed(2)}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block">Kaldıraç & Risk:</span>
+                          <span className="text-cyan-300 font-bold">{acc.leverage_cap || 5}x | %{acc.max_risk_pct || 2}%</span>
+                        </div>
                       </div>
                     </div>
                   </div>
 
-                  <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between">
+                  {/* KART BUTONLARI: Ayarlar, Bakiye Çek, Sil, Aktif Yap */}
+                  <div className="mt-3.5 pt-2.5 border-t border-slate-800/80 flex items-center justify-between gap-1.5 flex-wrap">
+                    <div className="flex items-center gap-1.5">
+                      {/* 1. AYARLAR BUTONU */}
+                      <button
+                        onClick={() => handleOpenEditAccount(acc)}
+                        className="px-2.5 py-1 rounded bg-slate-800 hover:bg-cyan-900/60 text-slate-200 hover:text-cyan-300 font-bold text-xs flex items-center gap-1 border border-slate-700/80 transition cursor-pointer"
+                        title="Bu hesabın ayarlarını, API anahtarlarını ve risk limitlerini düzenle"
+                      >
+                        <Settings className="w-3.5 h-3.5 text-cyan-400" />
+                        <span>Ayarlar</span>
+                      </button>
+
+                      {/* 2. CANLI BAKİYE SENKRONİZE ET BUTONU */}
+                      <button
+                        onClick={() => handleSyncAccountBalance(acc.id)}
+                        disabled={isSyncingThis}
+                        className={`px-2.5 py-1 rounded bg-slate-800 hover:bg-amber-950/60 text-amber-300 hover:text-amber-200 font-bold text-xs flex items-center gap-1 border border-amber-600/40 hover:border-amber-500 transition cursor-pointer ${
+                          isSyncingThis ? 'opacity-60 cursor-not-allowed' : ''
+                        }`}
+                        title="Binance'ten bu hesaba ait canlı bakiyeyi çek ve güncelle"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 text-amber-400 ${isSyncingThis ? 'animate-spin' : ''}`} />
+                        <span>{isSyncingThis ? 'Çekiliyor...' : 'Bakiye Çek'}</span>
+                      </button>
+
+                      {/* 3. SİL BUTONU */}
+                      <button
+                        onClick={() => handleDeleteAccount(acc.id)}
+                        className="p-1 rounded text-slate-500 hover:text-rose-400 hover:bg-rose-950/40 border border-transparent hover:border-rose-900/50 transition cursor-pointer"
+                        title="Hesabı Sil"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    {/* 4. AKTİF YAP BUTONU */}
                     {!isActive ? (
                       <button
                         onClick={() => selectAccount(acc.id)}
-                        className="px-3 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs cursor-pointer"
+                        className="px-3 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs cursor-pointer shadow-sm transition"
                       >
                         Aktif Yap
                       </button>
                     ) : (
-                      <span className="text-xs font-bold text-cyan-400 flex items-center gap-1">
-                        <CheckCircle className="w-3.5 h-3.5" /> Seçili Aktif Hesap
+                      <span className="text-[11px] font-bold text-cyan-400 flex items-center gap-1 py-1 px-1.5">
+                        <CheckCircle className="w-3.5 h-3.5" /> Seçili Aktif
                       </span>
                     )}
-
-                    <button
-                      onClick={() => handleDeleteAccount(acc.id)}
-                      className="p-1.5 text-slate-500 hover:text-rose-400 transition cursor-pointer"
-                      title="Hesabı Sil"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
                   </div>
                 </div>
               );
             })}
+
+            {/* YENİ HESAP EKLE KARTI */}
+            <div
+              onClick={() => setIsAddAccountModalOpen(true)}
+              className="p-5 rounded-xl border-2 border-dashed border-slate-800 hover:border-cyan-500/60 bg-[#0b0e14]/60 hover:bg-cyan-950/20 transition cursor-pointer flex flex-col items-center justify-center text-center group min-h-[240px]"
+            >
+              <div className="w-12 h-12 rounded-full bg-slate-900 group-hover:bg-cyan-950/80 border border-slate-700 group-hover:border-cyan-500 flex items-center justify-center text-slate-400 group-hover:text-cyan-300 transition mb-3">
+                <UserPlus className="w-6 h-6" />
+              </div>
+              <h3 className="font-bold text-sm text-white group-hover:text-cyan-300 transition">
+                + Yeni Hesap Ekle
+              </h3>
+              <p className="text-xs text-slate-400 max-w-xs mt-1 leading-relaxed">
+                Yeni bir Binance Vadeli/Spot API hesabı bağlayın veya ayrı bir sanal test hesabı oluşturun.
+              </p>
+              <span className="mt-3 px-3 py-1 rounded-full text-[11px] font-bold bg-cyan-950/80 text-cyan-400 border border-cyan-800/80 group-hover:border-cyan-400 transition">
+                Hesap Oluştur & API Bağla
+              </span>
+            </div>
           </div>
         </main>
       )}
@@ -2551,20 +2848,45 @@ export default function UnifiedQuantCockpit() {
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditAccount(acc)}
+                            className="px-2 py-1 rounded bg-slate-800 hover:bg-cyan-950/80 text-slate-200 hover:text-cyan-300 border border-slate-700/80 text-[11px] font-bold flex items-center gap-1 transition cursor-pointer"
+                            title="Hesap Ayarları & API Düzenle"
+                          >
+                            <Settings className="w-3 h-3 text-cyan-400" />
+                            <span>Ayarlar</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleSyncAccountBalance(acc.id)}
+                            disabled={syncingAccountId === acc.id}
+                            className="px-2 py-1 rounded bg-slate-800 hover:bg-amber-950/80 text-amber-300 hover:text-amber-200 border border-amber-600/40 text-[11px] font-bold flex items-center gap-1 transition cursor-pointer"
+                            title="Binance'ten Canlı Bakiye Çek"
+                          >
+                            <RefreshCw className={`w-3 h-3 ${syncingAccountId === acc.id ? 'animate-spin' : ''}`} />
+                            <span>{syncingAccountId === acc.id ? 'Çekiliyor...' : 'Bakiye Çek'}</span>
+                          </button>
+
                           {activeAccount?.id !== acc.id && (
                             <button
+                              type="button"
                               onClick={() => selectAccount(acc.id)}
-                              className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold cursor-pointer"
+                              className="px-2.5 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-[11px] font-bold cursor-pointer transition"
                             >
                               Aktif Yap
                             </button>
                           )}
+
                           <button
+                            type="button"
                             onClick={() => handleDeleteAccount(acc.id)}
-                            className="p-1 text-slate-500 hover:text-rose-400 transition cursor-pointer"
+                            className="p-1 rounded text-slate-500 hover:text-rose-400 hover:bg-rose-950/40 transition cursor-pointer"
+                            title="Hesabı Sil"
                           >
-                            <Trash2 className="w-4 h-4" />
+                            <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </div>
@@ -3587,6 +3909,612 @@ export default function UnifiedQuantCockpit() {
             >
               Kapat
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================
+          HER HESABA ÖZEL AYARLAR MODALI (Per-Account Settings Modal)
+         ======================================================== */}
+      {editingAccount && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#0b0e14] border border-cyan-700/80 rounded-2xl max-w-2xl w-full p-5 shadow-2xl space-y-4 font-sans animate-in fade-in zoom-in-95 duration-150 max-h-[90vh] overflow-y-auto">
+            
+            {/* Modal Başlığı */}
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-cyan-950 border border-cyan-700/80 flex items-center justify-center text-cyan-400">
+                  <Settings className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-white flex items-center gap-2">
+                    <span>Hesap Ayarları</span>
+                    <span className="text-slate-400 text-xs font-normal font-mono">// {editingAccount.name}</span>
+                  </h3>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className={`px-2 py-0.2 rounded text-[9.5px] font-bold ${
+                      editingAccount.type === 'REAL' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-cyan-950 text-cyan-400 border border-cyan-800'
+                    }`}>
+                      {editingAccount.type === 'REAL' ? 'GERÇEK BİNANCE API' : 'SANAL TESTNET'}
+                    </span>
+                    <span className="text-[11px] text-slate-400 font-mono">
+                      Bakiye: <b className="text-amber-300">${Number(editingAccount.balance || 0).toFixed(2)} USDT</b>
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setEditingAccount(null)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Bildirim / Sonuç Kutusu */}
+            {accountSyncResult && (
+              <div className={`p-3 rounded-xl border text-xs font-mono flex items-center justify-between gap-2 ${
+                accountSyncResult.type === 'success' ? 'bg-emerald-950/70 border-emerald-700 text-emerald-200' : 'bg-rose-950/70 border-rose-700 text-rose-200'
+              }`}>
+                <span>{accountSyncResult.text}</span>
+                <button type="button" onClick={() => setAccountSyncResult(null)} className="text-slate-400 hover:text-white">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* Ayar Sekmeleri: Genel, API & Bakiye, Kuant & Risk */}
+            <div className="flex items-center gap-1.5 p-1 rounded-xl bg-slate-900 border border-slate-800 text-xs font-bold">
+              <button
+                type="button"
+                onClick={() => setAccountModalTab('general')}
+                className={`flex-1 py-1.5 rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 ${
+                  accountModalTab === 'general' ? 'bg-cyan-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <span>📋 Genel Ayarlar</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setAccountModalTab('api')}
+                className={`flex-1 py-1.5 rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 ${
+                  accountModalTab === 'api' ? 'bg-cyan-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Key className="w-3.5 h-3.5" />
+                <span>Binance API & Bakiye</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setAccountModalTab('risk')}
+                className={`flex-1 py-1.5 rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 ${
+                  accountModalTab === 'risk' ? 'bg-cyan-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>Kuant & Risk</span>
+              </button>
+            </div>
+
+            {/* SEKME 1: GENEL AYARLAR */}
+            {accountModalTab === 'general' && (
+              <div className="space-y-3.5 text-xs">
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">Hesap İsmi</label>
+                  <input
+                    type="text"
+                    value={editingAccount.name || ''}
+                    onChange={(e) => setEditingAccount({ ...editingAccount, name: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs font-medium focus:border-cyan-500 focus:outline-none"
+                    placeholder="Örn: Binance Ana Vadeli"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Hesap Modu</label>
+                    <select
+                      value={editingAccount.type || 'PAPER'}
+                      onChange={(e) => setEditingAccount({ ...editingAccount, type: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs font-medium focus:border-cyan-500 focus:outline-none cursor-pointer"
+                    >
+                      <option value="PAPER">🧪 Sanal (Paper Trading / Simülasyon)</option>
+                      <option value="REAL">🟢 Gerçek (Binance API Canlı)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Borsa Türü</label>
+                    <select
+                      value={editingAccount.broker || 'BINANCE_FUTURES'}
+                      onChange={(e) => setEditingAccount({ ...editingAccount, broker: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs font-medium focus:border-cyan-500 focus:outline-none cursor-pointer"
+                    >
+                      <option value="BINANCE_FUTURES">Binance Vadeli İşlemler (USDT-M Futures)</option>
+                      <option value="BINANCE_SPOT">Binance Spot Cüzdanı</option>
+                      <option value="BYBIT">Bybit Vadeli (Entegrasyon Hazır)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Testnet ve Bakiye Girişi */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 flex items-center justify-between">
+                    <div>
+                      <span className="text-white font-semibold block">Binance Testnet</span>
+                      <span className="text-[11px] text-slate-400">Canlı Mainnet yerine Testnet kullan</span>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(editingAccount.testnet)}
+                        onChange={(e) => setEditingAccount({ ...editingAccount, testnet: e.target.checked })}
+                        className="sr-only peer"
+                      />
+                      <div className="w-9 h-5 bg-slate-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:bg-cyan-600 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+                    </label>
+                  </div>
+
+                  <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800">
+                    <label className="block text-slate-300 font-semibold mb-1">
+                      {editingAccount.type === 'REAL' ? 'Son Çekilen Bakiye (USDT)' : 'Sanal Bakiye Belirle (USDT)'}
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={editingAccount.balance ?? 0}
+                      onChange={(e) => setEditingAccount({ ...editingAccount, balance: parseFloat(e.target.value) || 0 })}
+                      disabled={editingAccount.type === 'REAL'}
+                      className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono text-xs focus:border-cyan-500 focus:outline-none disabled:opacity-70 disabled:bg-slate-900"
+                    />
+                    {editingAccount.type === 'REAL' && (
+                      <span className="text-[10px] text-slate-400 mt-1 block">
+                        * Gerçek hesap bakiyesi Binance API üzerinden otomatik güncellenir.
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* SEKME 2: BİNANCE API & CANLI BAKİYE DOĞRULAMA */}
+            {accountModalTab === 'api' && (
+              <div className="space-y-3.5 text-xs font-sans">
+                {/* Güvenlik Bilgilendirmesi */}
+                <div className="p-3 rounded-xl bg-cyan-950/40 border border-cyan-800/60 text-cyan-200 text-xs leading-relaxed flex items-start gap-2.5">
+                  <span className="text-base">🔒</span>
+                  <div>
+                    <span className="font-bold text-white block">Güvenli Dahili Saklama:</span>
+                    <span>
+                      Bu hesaba ait API Key ve Secret anahtarları doğrudan veritabanında saklanır. ENV ortam değişkenlerine yazılmaz ve dışarıya sızdırılmaz.
+                    </span>
+                  </div>
+                </div>
+
+                {/* API Key */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-slate-300 font-semibold">Binance API Key</label>
+                    {settingsForm.binance_api_key && (!editingAccount.api_key || editingAccount.api_key !== settingsForm.binance_api_key) && (
+                      <button
+                        type="button"
+                        onClick={() => setEditingAccount({
+                          ...editingAccount,
+                          api_key: settingsForm.binance_api_key,
+                          api_secret: settingsForm.binance_api_secret || editingAccount.api_secret
+                        })}
+                        className="text-[10.5px] text-cyan-400 hover:text-cyan-300 underline cursor-pointer"
+                      >
+                        Sistem Genel Anahtarını Aktar
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    type="text"
+                    value={editingAccount.api_key || ''}
+                    onChange={(e) => setEditingAccount({ ...editingAccount, api_key: e.target.value.trim() })}
+                    placeholder="Binance 64 karakterli API Key"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono text-xs focus:border-cyan-500 focus:outline-none"
+                  />
+                </div>
+
+                {/* API Secret */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-slate-300 font-semibold">Binance API Secret (Gizli Anahtar)</label>
+                    <button
+                      type="button"
+                      onClick={() => setShowEditSecret(!showEditSecret)}
+                      className="text-[10.5px] text-slate-400 hover:text-slate-200 flex items-center gap-1 cursor-pointer"
+                    >
+                      {showEditSecret ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                      <span>{showEditSecret ? 'Gizle' : 'Göster'}</span>
+                    </button>
+                  </div>
+                  <input
+                    type={showEditSecret ? 'text' : 'password'}
+                    value={editingAccount.api_secret || ''}
+                    onChange={(e) => setEditingAccount({ ...editingAccount, api_secret: e.target.value.trim() })}
+                    placeholder="Binance API Secret Key"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono text-xs focus:border-cyan-500 focus:outline-none"
+                  />
+                </div>
+
+                {/* Bağlantıyı Test Et & Canlı Bakiyeyi Doğrula Butonu */}
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={handleTestCredentials}
+                    disabled={isTestingCredentials || !editingAccount.api_key || !editingAccount.api_secret}
+                    className="w-full py-2.5 rounded-xl font-bold text-xs uppercase tracking-wider bg-slate-900 hover:bg-cyan-950 text-cyan-300 hover:text-cyan-200 border border-cyan-700 hover:border-cyan-500 transition cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isTestingCredentials ? 'animate-spin' : ''}`} />
+                    <span>{isTestingCredentials ? 'Binance Bağlantısı Doğrulanıyor...' : '🔄 Bağlantıyı Test Et & Gerçek Bakiyeyi Sorgula'}</span>
+                  </button>
+                </div>
+
+                {/* Test Sonuç Kutusu */}
+                {testCredentialsResult && (
+                  <div className={`p-3.5 rounded-xl border text-xs font-mono space-y-1.5 ${
+                    testCredentialsResult.type === 'success'
+                      ? 'bg-emerald-950/70 border-emerald-700/80 text-emerald-200'
+                      : 'bg-rose-950/70 border-rose-700/80 text-rose-200'
+                  }`}>
+                    <div className="flex items-center gap-2 font-bold text-sm">
+                      {testCredentialsResult.type === 'success' ? (
+                        <>
+                          <CheckCircle className="w-4 h-4 text-emerald-400" />
+                          <span>Bağlantı Başarılı! Gerçek Bakiye Doğrulandı.</span>
+                        </>
+                      ) : (
+                        <>
+                          <AlertTriangle className="w-4 h-4 text-rose-400" />
+                          <span>Binance Bağlantı Hatası</span>
+                        </>
+                      )}
+                    </div>
+
+                    <p className="text-[11px] leading-relaxed text-slate-300">
+                      {testCredentialsResult.message}
+                    </p>
+
+                    {testCredentialsResult.type === 'success' && (
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-2 border-t border-emerald-800/60 text-xs">
+                        <div>
+                          <span className="text-slate-400 block text-[10px]">Cüzdan Bakiyesi:</span>
+                          <span className="text-emerald-300 font-bold text-sm font-mono">${Number(testCredentialsResult.wallet_balance || 0).toFixed(2)} USDT</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-400 block text-[10px]">Kullanılabilir:</span>
+                          <span className="text-white font-bold text-sm font-mono">${Number(testCredentialsResult.available_balance || 0).toFixed(2)} USDT</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-400 block text-[10px]">Açık Pozisyonlar:</span>
+                          <span className="text-cyan-300 font-bold text-sm font-mono">{testCredentialsResult.details?.open_positions_count || 0} Adet</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* SEKME 3: KUANT & RİSK YÖNETİMİ */}
+            {accountModalTab === 'risk' && (
+              <div className="space-y-3.5 text-xs font-sans">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {/* Maksimum Kaldıraç */}
+                  <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800">
+                    <label className="block text-slate-300 font-semibold mb-1">Maksimum Kaldıraç (Cap)</label>
+                    <select
+                      value={editingAccount.leverage_cap || 5}
+                      onChange={(e) => setEditingAccount({ ...editingAccount, leverage_cap: parseInt(e.target.value, 10) || 5 })}
+                      className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono text-xs cursor-pointer focus:border-cyan-500 focus:outline-none"
+                    >
+                      <option value={2}>2x (Aşırı Korumacı)</option>
+                      <option value={3}>3x (Düşük Risk)</option>
+                      <option value={5}>5x (Varsayılan Kuant)</option>
+                      <option value={10}>10x (Yüksek Volatilite)</option>
+                      <option value={20}>20x (Agresif HFT)</option>
+                    </select>
+                    <span className="text-[10px] text-slate-500 mt-1 block">Hesap bazında emir açılışında kullanılacak üst kaldıraç sınırı.</span>
+                  </div>
+
+                  {/* İşlem Başına Risk % */}
+                  <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800">
+                    <label className="block text-slate-300 font-semibold mb-1">İşlem Başına Risk Limiti (%)</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={editingAccount.max_risk_pct ?? 2.0}
+                      onChange={(e) => setEditingAccount({ ...editingAccount, max_risk_pct: parseFloat(e.target.value) || 2.0 })}
+                      className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono text-xs focus:border-cyan-500 focus:outline-none"
+                    />
+                    <span className="text-[10px] text-slate-500 mt-1 block">Her işlemde marjin olarak ayrılacak maksimum bakiye yüzdesi.</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {/* Stop Loss % */}
+                  <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800">
+                    <label className="block text-slate-300 font-semibold mb-1">Stop Loss (%)</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={editingAccount.stop_loss_pct ?? 1.85}
+                      onChange={(e) => setEditingAccount({ ...editingAccount, stop_loss_pct: parseFloat(e.target.value) || 1.85 })}
+                      className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono text-xs focus:border-cyan-500 focus:outline-none"
+                    />
+                  </div>
+
+                  {/* Take Profit % */}
+                  <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800">
+                    <label className="block text-slate-300 font-semibold mb-1">Take Profit (%)</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={editingAccount.take_profit_pct ?? 4.5}
+                      onChange={(e) => setEditingAccount({ ...editingAccount, take_profit_pct: parseFloat(e.target.value) || 4.5 })}
+                      className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono text-xs focus:border-cyan-500 focus:outline-none"
+                    />
+                  </div>
+
+                  {/* Trailing Stop % */}
+                  <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800">
+                    <label className="block text-slate-300 font-semibold mb-1">İz Süren Stop (%)</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={editingAccount.trailing_stop_pct ?? 1.2}
+                      onChange={(e) => setEditingAccount({ ...editingAccount, trailing_stop_pct: parseFloat(e.target.value) || 1.2 })}
+                      className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono text-xs focus:border-cyan-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Hummingbot PMM Kotasyon Makası */}
+                <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 flex items-center justify-between">
+                  <div>
+                    <span className="text-white font-semibold block">Hummingbot Pure Market Making (PMM) Makası</span>
+                    <span className="text-[11px] text-slate-400">Avellaneda-Stoikov envanter sapmasına göre limit maker marjı</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 font-mono">
+                    <input
+                      type="number"
+                      step="0.05"
+                      value={editingAccount.pmm_spread_pct ?? 0.15}
+                      onChange={(e) => setEditingAccount({ ...editingAccount, pmm_spread_pct: parseFloat(e.target.value) || 0.15 })}
+                      className="w-20 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-white text-xs font-mono text-right"
+                    />
+                    <span className="text-slate-400 font-bold">%</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* MODAL ALT BUTONLARI: Sil, Kapat, Kaydet & Canlı Bakiye Eşitle */}
+            <div className="flex items-center justify-between pt-3.5 border-t border-slate-800 flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  handleDeleteAccount(editingAccount.id);
+                }}
+                className="px-3 py-2 rounded-xl text-xs font-bold text-rose-400 hover:text-white bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/60 transition cursor-pointer flex items-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Bu Hesabı Sil</span>
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingAccount(null)}
+                  className="px-3.5 py-2 rounded-xl text-xs font-bold text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 transition cursor-pointer"
+                >
+                  Kapat
+                </button>
+
+                {editingAccount.type === 'REAL' && (
+                  <button
+                    type="button"
+                    onClick={() => handleSaveAccountSettings(true)}
+                    disabled={isSavingAccount}
+                    className="px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider text-amber-950 bg-amber-400 hover:bg-amber-300 transition shadow-lg shadow-amber-950/40 cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                    title="Ayarları kaydet ve Binance üzerinden canlı bakiyeyi çek"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isSavingAccount ? 'animate-spin' : ''}`} />
+                    <span>Kaydet & Canlı Bakiyeyi Eşitle</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => handleSaveAccountSettings(false)}
+                  disabled={isSavingAccount}
+                  className="px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider text-white bg-cyan-600 hover:bg-cyan-500 transition shadow-lg shadow-cyan-950/50 cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>{isSavingAccount ? 'Kaydediliyor...' : 'Ayarları Kaydet'}</span>
+                </button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================
+          HESAP SİLME ONAY MODALI (Delete Account Modal)
+         ======================================================== */}
+      {accountToDelete && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#0f1420] border border-rose-700/80 rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4 font-sans animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-3 text-rose-400 font-bold border-b border-slate-800 pb-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-950 border border-rose-800 flex items-center justify-center text-rose-400 shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base text-white font-black">Hesabı Silmek Üzeresiniz</h3>
+                <span className="text-xs text-rose-400/90 font-mono">{accountToDelete.name}</span>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              <b>'{accountToDelete.name}'</b> hesabı ve bu hesaba bağlı tüm açık pozisyonlar, bekleyen limit emirleri ve geçmiş işlem kayıtları kalıcı olarak silinecektir.
+            </p>
+
+            {(accounts || []).length <= 1 && (
+              <div className="p-3 rounded-lg bg-rose-950/80 border border-rose-700 text-rose-200 text-xs">
+                ⚠️ Sistemde en az bir aktif hesap bulunmalıdır. Tek hesabı silemezsiniz.
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setAccountToDelete(null)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 transition cursor-pointer"
+              >
+                Vazgeç
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteAccount}
+                disabled={(accounts || []).length <= 1}
+                className="px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider text-white bg-rose-600 hover:bg-rose-500 transition shadow-lg shadow-rose-950/50 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Evet, Hesabı Kalıcı Olarak Sil
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================
+          YENİ HESAP EKLE MODALI (Add Account Modal)
+         ======================================================== */}
+      {isAddAccountModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#0b0e14] border border-cyan-700/80 rounded-2xl max-w-lg w-full p-5 shadow-2xl space-y-4 font-sans animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-cyan-950 border border-cyan-700/80 flex items-center justify-center text-cyan-400">
+                  <UserPlus className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-white">Yeni Hesap Tanımla</h3>
+                  <p className="text-[11px] text-slate-400">Sanal simülasyon veya gerçek Binance API bağlantısı</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAddAccountModalOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={async (e) => {
+              await handleAddAccount(e);
+              setIsAddAccountModalOpen(false);
+            }} className="space-y-3.5 text-xs">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Hesap İsmi</label>
+                <input
+                  type="text"
+                  required
+                  value={newAccName}
+                  onChange={(e) => setNewAccName(e.target.value)}
+                  placeholder="Örn: Binance Canlı Vadeli"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs font-medium focus:border-cyan-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">Hesap Türü</label>
+                  <select
+                    value={newAccType}
+                    onChange={(e) => setNewAccType(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs font-medium focus:border-cyan-500 focus:outline-none cursor-pointer"
+                  >
+                    <option value="PAPER">🧪 Sanal (Paper Trading)</option>
+                    <option value="REAL">🟢 Gerçek (Binance API)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">Başlangıç Bakiyesi (USDT)</label>
+                  <input
+                    type="number"
+                    value={newAccBalance}
+                    onChange={(e) => setNewAccBalance(e.target.value)}
+                    disabled={newAccType === 'REAL'}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono text-xs focus:border-cyan-500 focus:outline-none disabled:opacity-50"
+                  />
+                </div>
+              </div>
+
+              {newAccType === 'REAL' && (
+                <div className="space-y-2.5 p-3.5 rounded-xl bg-slate-950 border border-slate-800">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Binance API Key</label>
+                    <input
+                      type="text"
+                      required
+                      value={newAccApiKey}
+                      onChange={(e) => setNewAccApiKey(e.target.value.trim())}
+                      placeholder="API Key"
+                      className="w-full bg-black border border-slate-700 rounded-lg px-3 py-1.5 text-white font-mono text-xs focus:border-cyan-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Binance API Secret</label>
+                    <input
+                      type="password"
+                      required
+                      value={newAccApiSecret}
+                      onChange={(e) => setNewAccApiSecret(e.target.value.trim())}
+                      placeholder="Secret Key"
+                      className="w-full bg-black border border-slate-700 rounded-lg px-3 py-1.5 text-white font-mono text-xs focus:border-cyan-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1">
+                    <span className="text-slate-400">Binance Testnet mi?</span>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={newAccTestnet}
+                        onChange={(e) => setNewAccTestnet(e.target.checked)}
+                        className="sr-only peer"
+                      />
+                      <div className="w-9 h-5 bg-slate-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:bg-cyan-600 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setIsAddAccountModalOpen(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 transition cursor-pointer"
+                >
+                  İptal
+                </button>
+                <button
+                  type="submit"
+                  disabled={isAddingAcc}
+                  className="px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider text-white bg-cyan-600 hover:bg-cyan-500 transition shadow-lg shadow-cyan-950/50 cursor-pointer disabled:opacity-50"
+                >
+                  {isAddingAcc ? 'Hesap Oluşturuluyor...' : 'Hesabı Kaydet'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
