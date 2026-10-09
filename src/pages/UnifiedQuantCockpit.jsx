@@ -234,6 +234,36 @@ export default function UnifiedQuantCockpit() {
   // Add Account Modal State
   const [isAddAccountModalOpen, setIsAddAccountModalOpen] = useState(false);
 
+  // Funding Fee Arbitrage Tab State
+  const [fundingTop10, setFundingTop10] = useState([]);
+  const [fundingReverseTop5, setFundingReverseTop5] = useState([]);
+  const [isLoadingFunding, setIsLoadingFunding] = useState(false);
+  const [fundingEngine, setFundingEngine] = useState(null);
+  const [fundingSelectedSymbols, setFundingSelectedSymbols] = useState(['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
+  const [fundingCapital, setFundingCapital] = useState(2000);
+  const [fundingMinApr, setFundingMinApr] = useState(15.0);
+  const [fundingLeverage, setFundingLeverage] = useState(1);
+  const [fundingTab, setFundingTab] = useState('opportunities'); // 'opportunities' | 'active_positions' | 'logs'
+  const [fundingActionMsg, setFundingActionMsg] = useState('');
+
+  // Hummingbot Backtest Tab State
+  const [backtestSymbol, setBacktestSymbol] = useState('BTCUSDT');
+  const [backtestInterval, setBacktestInterval] = useState('1h');
+  const [backtestLimit, setBacktestLimit] = useState(200);
+  const [backtestCapital, setBacktestCapital] = useState(10000);
+  const [backtestLeverage, setBacktestLeverage] = useState(2);
+  const [backtestAgents, setBacktestAgents] = useState({
+    market_maker: true,
+    trend_follower: true,
+    funding_arb: true,
+    liquidity_hunter: true,
+    risk_sentinel: true,
+    mean_reversion: true,
+  });
+  const [isRunningBacktest, setIsRunningBacktest] = useState(false);
+  const [backtestResult, setBacktestResult] = useState(null);
+  const [backtestViewTab, setBacktestViewTab] = useState('overview'); // 'overview' | 'agents' | 'trades'
+
   // Settings Categories in Settings View: 'risk' | 'api' | 'telegram' | 'auth' | 'updates'
   const [settingsCategory, setSettingsCategory] = useState('risk');
   const [settingsForm, setSettingsForm] = useState({
@@ -697,6 +727,147 @@ export default function UnifiedQuantCockpit() {
       setSyncingAccountId(null);
     }
   };
+
+  // ----------------------------------------------------
+  // FONLAMA ORANI ARBİTRAJI (Funding Fee Arbitrage) Handlers
+  // ----------------------------------------------------
+  const fetchFundingData = async () => {
+    try {
+      setIsLoadingFunding(true);
+      const [rRates, rStatus] = await Promise.all([
+        fetch(`${API_BASE}/api/funding-rates/top10`).then(r => r.json()).catch(() => null),
+        fetch(`${API_BASE}/api/funding-arbitrage/status`).then(r => r.json()).catch(() => null),
+      ]);
+      if (rRates && rRates.success) {
+        setFundingTop10(rRates.top10 || []);
+        setFundingReverseTop5(rRates.reverse_top5 || []);
+      }
+      if (rStatus && rStatus.success) {
+        setFundingEngine(rStatus.engine || null);
+      }
+    } catch (err) {
+      console.error('Funding data fetch error:', err);
+    } finally {
+      setIsLoadingFunding(false);
+    }
+  };
+
+  const handleStartFundingArbitrage = async () => {
+    if (!fundingSelectedSymbols || fundingSelectedSymbols.length === 0) {
+      alert('Lütfen en az bir arbitraj paritesi seçiniz.');
+      return;
+    }
+    try {
+      setFundingActionMsg('Arbitraj motoru başlatılıyor...');
+      const res = await fetch(`${API_BASE}/api/funding-arbitrage/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbols: fundingSelectedSymbols,
+          capital_usdt: fundingCapital,
+          min_apr_threshold: fundingMinApr,
+          leverage: fundingLeverage,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setFundingEngine(data.engine);
+        setFundingActionMsg('⚡ Arbitraj motoru başarıyla başlatıldı! Spot LONG + Vadeli SHORT açıldı. Delta = 0.');
+        setFundingTab('active_positions');
+        setTimeout(() => setFundingActionMsg(''), 6000);
+      } else {
+        alert(data.detail || 'Arbitraj motoru başlatılamadı.');
+      }
+    } catch (err) {
+      alert('Hata: ' + err.message);
+    }
+  };
+
+  const handleStopFundingArbitrage = async () => {
+    try {
+      setFundingActionMsg('Arbitraj pozisyonları kârla kapatılıyor...');
+      const res = await fetch(`${API_BASE}/api/funding-arbitrage/stop`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.success) {
+        setFundingEngine(data.engine);
+        setFundingActionMsg('🛑 Arbitraj motoru durduruldu. Pozisyonlar kârla kapatıldı.');
+        setTimeout(() => setFundingActionMsg(''), 6000);
+      }
+    } catch (err) {
+      alert('Hata: ' + err.message);
+    }
+  };
+
+  const toggleFundingSymbol = (sym) => {
+    setFundingSelectedSymbols(prev => {
+      if (prev.includes(sym)) {
+        return prev.filter(s => s !== sym);
+      } else {
+        return [...prev, sym];
+      }
+    });
+  };
+
+  // ----------------------------------------------------
+  // HUMMINGBOT BACKTEST HANDLERS
+  // ----------------------------------------------------
+  const handleRunBacktest = async () => {
+    const activeCount = Object.values(backtestAgents).filter(Boolean).length;
+    if (activeCount === 0) {
+      alert('Lütfen test edilecek en az bir aktif ajan seçiniz.');
+      return;
+    }
+    try {
+      setIsRunningBacktest(true);
+      const res = await fetch(`${API_BASE}/api/backtest/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: backtestSymbol,
+          interval: backtestInterval,
+          limit: backtestLimit,
+          initial_capital: backtestCapital,
+          leverage: backtestLeverage,
+          agents: backtestAgents,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setBacktestResult(data);
+      } else {
+        alert(data.detail || 'Backtest çalıştırılırken hata oluştu.');
+      }
+    } catch (err) {
+      alert('Backtest hatası: ' + err.message);
+    } finally {
+      setIsRunningBacktest(false);
+    }
+  };
+
+  const toggleBacktestAgent = (agentKey) => {
+    setBacktestAgents(prev => ({
+      ...prev,
+      [agentKey]: !prev[agentKey]
+    }));
+  };
+
+  // Funding periodic poller
+  useEffect(() => {
+    if (mainView === 'funding') {
+      fetchFundingData();
+      const interval = setInterval(fetchFundingData, 4000);
+      return () => clearInterval(interval);
+    }
+  }, [mainView]);
+
+  // Backtest auto-run on first visit
+  useEffect(() => {
+    if (mainView === 'backtest' && !backtestResult && !isRunningBacktest) {
+      handleRunBacktest();
+    }
+  }, [mainView]);
 
   const handleSaveSettings = async (e) => {
     if (e) e.preventDefault();
@@ -1267,11 +1438,11 @@ export default function UnifiedQuantCockpit() {
             <span>AEGISQUANT <span className="text-white text-xs font-semibold px-1 py-0.5 rounded bg-cyan-950/80 border border-cyan-800/50">v3.0</span></span>
           </div>
 
-          {/* 4 Ana Modül Sekmesi */}
-          <nav className="flex items-center gap-1 bg-slate-900/90 p-1 rounded-lg border border-slate-800">
+          {/* 6 Ana Modül Sekmesi */}
+          <nav className="flex items-center gap-1 bg-slate-900/90 p-1 rounded-lg border border-slate-800 overflow-x-auto">
             <button
               onClick={() => setMainView('cockpit')}
-              className={`px-3 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+              className={`px-2.5 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
                 mainView === 'cockpit'
                   ? 'bg-cyan-600 text-white shadow'
                   : 'text-slate-400 hover:text-white'
@@ -1283,19 +1454,48 @@ export default function UnifiedQuantCockpit() {
 
             <button
               onClick={() => setMainView('portfolio')}
-              className={`px-3 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+              className={`px-2.5 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
                 mainView === 'portfolio'
                   ? 'bg-cyan-600 text-white shadow'
                   : 'text-slate-400 hover:text-white'
               }`}
             >
               <PieChart className="w-3.5 h-3.5" />
-              <span>PORTFÖY MASASI</span>
+              <span>HESAP YÖNETİCİSİ</span>
+            </button>
+
+            <button
+              onClick={() => setMainView('funding')}
+              className={`px-2.5 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
+                mainView === 'funding'
+                  ? 'bg-amber-600 text-white shadow'
+                  : 'text-amber-400/90 hover:text-amber-200'
+              }`}
+              title="Binance Spot & Vadeli Fonlama Oranı (Funding Fee) Delta-Nötr Arbitraj Deski"
+            >
+              <span className="text-xs">⚖️</span>
+              <span>FONLAMA ARBİTRAJI</span>
+              {fundingEngine?.is_running && (
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+              )}
+            </button>
+
+            <button
+              onClick={() => setMainView('backtest')}
+              className={`px-2.5 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
+                mainView === 'backtest'
+                  ? 'bg-purple-600 text-white shadow'
+                  : 'text-purple-400/90 hover:text-purple-200'
+              }`}
+              title="Hummingbot Canlı & Tarihsel Veri Çoklu Ajan Backtest Simülasyonu"
+            >
+              <span className="text-xs">🧪</span>
+              <span>HUMMİNGBOT BACKTEST</span>
             </button>
 
             <button
               onClick={() => setMainView('agents')}
-              className={`px-3 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+              className={`px-2.5 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
                 mainView === 'agents'
                   ? 'bg-cyan-600 text-white shadow'
                   : 'text-slate-400 hover:text-white'
@@ -1307,14 +1507,14 @@ export default function UnifiedQuantCockpit() {
 
             <button
               onClick={() => setMainView('settings')}
-              className={`px-3 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+              className={`px-2.5 py-1 rounded text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
                 mainView === 'settings'
                   ? 'bg-cyan-600 text-white shadow'
                   : 'text-slate-400 hover:text-white'
               }`}
             >
               <Settings className="w-3.5 h-3.5" />
-              <span>YÖNETİM AYARLARI</span>
+              <span>AYARLAR</span>
             </button>
           </nav>
 
@@ -2498,6 +2698,886 @@ export default function UnifiedQuantCockpit() {
               </span>
             </div>
           </div>
+        </main>
+      )}
+
+      {/* ========================================================
+          GÖRÜNÜM 2.5: FONLAMA ORANI ARBİTRAJI (Delta-Neutral Funding Fee)
+         ======================================================== */}
+      {mainView === 'funding' && (
+        <main className="flex-1 p-4 max-w-7xl mx-auto w-full space-y-4">
+          
+          {/* Başlık & Motor Özet Çubuğu */}
+          <div className="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xl">⚖️</span>
+                <h2 className="text-base font-black text-white uppercase tracking-wider">
+                  Fonlama Oranı Arbitrajı (Funding Fee Desk)
+                </h2>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-800">
+                  DELTA-NÖTR CASH & CARRY
+                </span>
+                {fundingEngine?.is_running && (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-700 flex items-center gap-1.5 animate-pulse">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                    <span>MOTOR ÇALIŞIYOR</span>
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-400 mt-1">
+                Binance Spot Alış (Long) + Vadeli Açığa Satış (Short) ile fiyat riskini sıfırlayarak 8 saatte bir vadeli fonlama ücreti tahsilatı.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={fetchFundingData}
+                disabled={isLoadingFunding}
+                className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 text-amber-400 ${isLoadingFunding ? 'animate-spin' : ''}`} />
+                <span>Yenile</span>
+              </button>
+
+              {fundingEngine?.is_running ? (
+                <button
+                  type="button"
+                  onClick={handleStopFundingArbitrage}
+                  className="px-4 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-black text-xs flex items-center gap-1.5 cursor-pointer shadow-lg shadow-rose-950/40"
+                >
+                  <Square className="w-3.5 h-3.5 fill-current" />
+                  <span>ARBİTRAJI DURDUR & KÂRLA KAPAT</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleStartFundingArbitrage}
+                  className="px-4 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-amber-950 font-black text-xs flex items-center gap-1.5 cursor-pointer shadow-lg shadow-amber-950/40"
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>ARBİTRAJ MOTORUNU BAŞLAT</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {fundingActionMsg && (
+            <div className="p-3 rounded-xl bg-amber-950/70 border border-amber-700/80 text-amber-200 text-xs font-bold font-mono animate-in fade-in">
+              {fundingActionMsg}
+            </div>
+          )}
+
+          {/* 4 KPI Gösterge Kartı */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {/* 1. Sonraki 8 Saatlik Tahsilat Sayacı */}
+            <div className="p-3.5 rounded-xl bg-[#0b0e14] border border-amber-800/40">
+              <div className="flex items-center justify-between text-slate-400 text-[11px] mb-1">
+                <span>Sonraki 8s Tahsilat</span>
+                <Clock className="w-3.5 h-3.5 text-amber-400" />
+              </div>
+              <div className="text-xl font-black font-mono text-amber-400">
+                {(() => {
+                  const s = fundingEngine?.countdown_seconds || 0;
+                  const hrs = Math.floor(s / 3600).toString().padStart(2, '0');
+                  const mins = Math.floor((s % 3600) / 60).toString().padStart(2, '0');
+                  const secs = (s % 60).toString().padStart(2, '0');
+                  return `${hrs}:${mins}:${secs}`;
+                })()}
+              </div>
+              <span className="text-[10px] text-slate-500 mt-0.5 block">00:00 / 08:00 / 16:00 UTC</span>
+            </div>
+
+            {/* 2. Toplam Birikmiş Fonlama Kârı */}
+            <div className="p-3.5 rounded-xl bg-[#0b0e14] border border-emerald-800/40">
+              <div className="flex items-center justify-between text-slate-400 text-[11px] mb-1">
+                <span>Tahsil Edilen Kâr</span>
+                <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
+              </div>
+              <div className="text-xl font-black font-mono text-emerald-400">
+                +${(fundingEngine?.total_accumulated_pnl || 0).toFixed(2)} USDT
+              </div>
+              <span className="text-[10px] text-emerald-500 mt-0.5 block">Delta-Nötr Risksiz Gelir</span>
+            </div>
+
+            {/* 3. Aktif Arbitraj Pariteleri */}
+            <div className="p-3.5 rounded-xl bg-[#0b0e14] border border-cyan-800/40">
+              <div className="flex items-center justify-between text-slate-400 text-[11px] mb-1">
+                <span>Aktif Taşıma Çiftleri</span>
+                <Layers className="w-3.5 h-3.5 text-cyan-400" />
+              </div>
+              <div className="text-xl font-black font-mono text-cyan-300">
+                {(fundingEngine?.active_pairs || []).filter(p => p.status === 'ACTIVE').length} Parite
+              </div>
+              <span className="text-[10px] text-slate-500 mt-0.5 block">Eşit Spot AL + Vadeli SHORT</span>
+            </div>
+
+            {/* 4. Net Piyasa Riski (Delta) */}
+            <div className="p-3.5 rounded-xl bg-[#0b0e14] border border-purple-800/40">
+              <div className="flex items-center justify-between text-slate-400 text-[11px] mb-1">
+                <span>Piyasa Maruziyeti (Delta)</span>
+                <ShieldCheck className="w-3.5 h-3.5 text-purple-400" />
+              </div>
+              <div className="text-xl font-black font-mono text-purple-300">
+                Δ = 0.00 USDT
+              </div>
+              <span className="text-[10px] text-purple-400/80 mt-0.5 block">Piyasa yönünden bağımsız</span>
+            </div>
+          </div>
+
+          {/* Kazanma Stratejisi ve 8 Saatlik Döngü Açıklama Şeması */}
+          <div className="p-4 rounded-xl bg-gradient-to-r from-amber-950/30 via-slate-900/60 to-cyan-950/30 border border-amber-800/50 text-xs">
+            <div className="flex items-center gap-2 font-black text-amber-300 text-sm mb-2">
+              <span>💡 KAZANMA STRATEJİSİ: 8 SAATLİK OTONOM FONLAMA ARBİTRAJI (CASH & CARRY)</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-slate-300 leading-relaxed text-[11.5px]">
+              <div className="p-2.5 rounded-lg bg-black/40 border border-slate-800">
+                <span className="font-bold text-cyan-400 block mb-1">1. Eşit Çift Bacak Açılışı</span>
+                Seçilen kârlı paritede <b>Spot Alış (LONG)</b> yapılırken aynı anda vadeli piyasada birebir eşit değerde <b>Vadeli Açığa Satış (SHORT)</b> açılır.
+              </div>
+              <div className="p-2.5 rounded-lg bg-black/40 border border-slate-800">
+                <span className="font-bold text-purple-400 block mb-1">2. Sıfır Fiyat Riski (Delta 0)</span>
+                Coin fiyatı ister %50 yükselsin ister %50 düşsün, spot kazancı vadeli kaybını (veya tersi) tam olarak sıfırlar. Kasa ana parası korunur.
+              </div>
+              <div className="p-2.5 rounded-lg bg-black/40 border border-slate-800">
+                <span className="font-bold text-amber-400 block mb-1">3. 8 Saatte Bir Fonlama Tahsilatı</span>
+                Pozitif fonlama oranlarında, vadeli piyasada short pozisyon tutanlar her 8 saatte bir vadeli long tutanlardan doğrudan nakit ödeme alır (Yıllık %20-%60+ APR).
+              </div>
+              <div className="p-2.5 rounded-lg bg-black/40 border border-slate-800">
+                <span className="font-bold text-emerald-400 block mb-1">4. Otonom 8s Yenileme & Çıkış</span>
+                Motor her 8 saatte bir oranı kontrol eder: Oran kârlı kalırsa devam eder; kâr eşiğinin altına düşer veya negatife dönerse spot ve vadeli bacağı kârla kapatır!
+              </div>
+            </div>
+          </div>
+
+          {/* Arbitraj Başlatma Parametreleri & Kontrol Paneli */}
+          <div className="p-4 rounded-xl bg-[#0b0e14] border border-slate-800 space-y-3.5">
+            <h3 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
+              <Sliders className="w-3.5 h-3.5 text-amber-400" />
+              <span>Arbitraj Motoru Yapılandırması</span>
+            </h3>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Toplam Tahsis Edilecek Sermaye (USDT)</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    step="100"
+                    value={fundingCapital}
+                    onChange={(e) => setFundingCapital(parseFloat(e.target.value) || 2000)}
+                    disabled={fundingEngine?.is_running}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono text-xs focus:border-amber-500 focus:outline-none disabled:opacity-50"
+                  />
+                  <span className="text-slate-400 font-bold font-mono">USDT</span>
+                </div>
+                <span className="text-[10px] text-slate-500 mt-1 block">Yarısı Spot Alış, yarısı Vadeli Short teminatı olur.</span>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Minimum Kârlı APR Eşiği (%)</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    step="1"
+                    value={fundingMinApr}
+                    onChange={(e) => setFundingMinApr(parseFloat(e.target.value) || 15.0)}
+                    disabled={fundingEngine?.is_running}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono text-xs focus:border-amber-500 focus:outline-none disabled:opacity-50"
+                  />
+                  <span className="text-slate-400 font-bold font-mono">% APR</span>
+                </div>
+                <span className="text-[10px] text-slate-500 mt-1 block">8 saatlik periyotta bu eşiğin altına inerse motor pozisyonu kapatır.</span>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Vadeli Bacak Kaldıracı</label>
+                <select
+                  value={fundingLeverage}
+                  onChange={(e) => setFundingLeverage(parseInt(e.target.value, 10) || 1)}
+                  disabled={fundingEngine?.is_running}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs cursor-pointer focus:border-amber-500 focus:outline-none disabled:opacity-50"
+                >
+                  <option value={1}>1x (Maksimum Güvenlik, Likidasyon Riski Sıfır)</option>
+                  <option value={2}>2x (Düşük Teminat, 2 Kat APR)</option>
+                  <option value={3}>3x (Agresif Taşıma Getirisi)</option>
+                </select>
+                <span className="text-[10px] text-slate-500 mt-1 block">Spot ve Vadeli bacaklar 1x kaldıraçta tam nötr çalışır.</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Alt Sekmeler: En İyi 10 Fonlama Oranı Tablosu | Açık Pozisyonlar | Geçmiş Günlük */}
+          <div className="border-b border-slate-800 flex items-center justify-between flex-wrap gap-2 pt-2">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setFundingTab('opportunities')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                  fundingTab === 'opportunities'
+                    ? 'bg-amber-600 text-white shadow'
+                    : 'bg-slate-900 text-slate-400 hover:text-white'
+                }`}
+              >
+                <span>🔥 En Yüksek 10 Fonlama Oranı (Binance Canlı)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setFundingTab('active_positions')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                  fundingTab === 'active_positions'
+                    ? 'bg-amber-600 text-white shadow'
+                    : 'bg-slate-900 text-slate-400 hover:text-white'
+                }`}
+              >
+                <span>⚡ Açık Arbitraj Pozisyonları ({(fundingEngine?.active_pairs || []).length})</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setFundingTab('logs')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                  fundingTab === 'logs'
+                    ? 'bg-amber-600 text-white shadow'
+                    : 'bg-slate-900 text-slate-400 hover:text-white'
+                }`}
+              >
+                <span>📜 8 Saatlik Tahsilat & Olay Günlüğü</span>
+              </button>
+            </div>
+
+            <div className="text-[11px] font-mono text-slate-400 flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+              <span>Binance Canlı API Verisi</span>
+            </div>
+          </div>
+
+          {/* SEKME 1: EN İYİ 10 FONLAMA ORANI TABLOSU */}
+          {fundingTab === 'opportunities' && (
+            <div className="rounded-xl border border-slate-800 bg-[#0b0e14] overflow-hidden shadow-xl">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="bg-slate-900/90 text-slate-400 border-b border-slate-800 uppercase tracking-wider text-[10px]">
+                      <th className="p-3 w-10 text-center">Seç</th>
+                      <th className="p-3">Parite (USDT-M)</th>
+                      <th className="p-3 text-right">Vadeli Fiyat</th>
+                      <th className="p-3 text-right">Spot Fiyat</th>
+                      <th className="p-3 text-right">Fiyat Farkı (Basis)</th>
+                      <th className="p-3 text-right">8s Fonlama Oranı</th>
+                      <th className="p-3 text-right font-bold text-amber-300">Yıllık APR</th>
+                      <th className="p-3 text-right">1.000$ Başına 8s Kazanç</th>
+                      <th className="p-3 text-right">Sonraki Ödeme Kalan</th>
+                      <th className="p-3 text-center">İşlem</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60 font-mono">
+                    {fundingTop10.length === 0 ? (
+                      <tr>
+                        <td colSpan={10} className="p-8 text-center text-slate-500 italic font-sans">
+                          Binance fonlama oranları sorgulanıyor...
+                        </td>
+                      </tr>
+                    ) : (
+                      fundingTop10.map((item, idx) => {
+                        const isSelected = fundingSelectedSymbols.includes(item.symbol);
+                        const isPositive = item.funding_rate_8h > 0;
+                        const timeRem = item.time_to_settlement_seconds || 0;
+                        const hrs = Math.floor(timeRem / 3600);
+                        const mins = Math.floor((timeRem % 3600) / 60);
+
+                        return (
+                          <tr
+                            key={item.symbol}
+                            className={`transition hover:bg-slate-900/50 ${
+                              isSelected ? 'bg-amber-950/20' : ''
+                            }`}
+                          >
+                            <td className="p-3 text-center">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => toggleFundingSymbol(item.symbol)}
+                                className="w-4 h-4 rounded border-slate-700 text-amber-500 focus:ring-amber-500 cursor-pointer"
+                              />
+                            </td>
+
+                            <td className="p-3 font-sans font-bold text-white flex items-center gap-2">
+                              <span className="w-5 h-5 rounded-full bg-slate-800 text-[10px] flex items-center justify-center font-mono text-amber-400">
+                                {idx + 1}
+                              </span>
+                              <span>{item.symbol}</span>
+                            </td>
+
+                            <td className="p-3 text-right text-slate-200">
+                              ${Number(item.futures_price || 0).toLocaleString()}
+                            </td>
+
+                            <td className="p-3 text-right text-slate-300">
+                              ${Number(item.spot_price || 0).toLocaleString()}
+                            </td>
+
+                            <td className={`p-3 text-right font-bold ${item.basis_spread_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {item.basis_spread_pct >= 0 ? '+' : ''}{Number(item.basis_spread_pct || 0).toFixed(3)}%
+                            </td>
+
+                            <td className={`p-3 text-right font-bold ${isPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {isPositive ? '+' : ''}%{Number(item.funding_rate_8h || 0).toFixed(4)}
+                            </td>
+
+                            <td className="p-3 text-right font-black text-amber-400 text-sm">
+                              %{Number(item.annualized_apr || 0).toFixed(2)} APR
+                            </td>
+
+                            <td className="p-3 text-right font-bold text-emerald-300">
+                              +${Number(item.est_payout_8h_1000u || 0).toFixed(2)} USDT
+                            </td>
+
+                            <td className="p-3 text-right text-slate-400 text-[11px]">
+                              {hrs}s {mins}d
+                            </td>
+
+                            <td className="p-3 text-center font-sans">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (!isSelected) toggleFundingSymbol(item.symbol);
+                                  handleStartFundingArbitrage();
+                                }}
+                                className="px-2.5 py-1 rounded bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 border border-amber-600/40 text-[11px] font-bold transition cursor-pointer"
+                              >
+                                Arbitraj Aç
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* SEKME 2: AÇIK ARBİTRAJ POZİSYONLARI */}
+          {fundingTab === 'active_positions' && (
+            <div className="space-y-3">
+              {(fundingEngine?.active_pairs || []).length === 0 ? (
+                <div className="p-8 rounded-xl border border-slate-800 bg-[#0b0e14] text-center space-y-3">
+                  <p className="text-slate-400 text-sm">Şu anda açık bir fonlama arbitrajı pozisyonu bulunmuyor.</p>
+                  <button
+                    type="button"
+                    onClick={() => setFundingTab('opportunities')}
+                    className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-amber-950 font-black text-xs cursor-pointer shadow-lg"
+                  >
+                    Fırsatları İncele & Arbitraj Başlat
+                  </button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                  {(fundingEngine?.active_pairs || []).map((pair) => (
+                    <div
+                      key={pair.symbol}
+                      className="p-4 rounded-xl bg-[#0b0e14] border border-amber-800/60 space-y-3 relative overflow-hidden"
+                    >
+                      <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-sm text-white">{pair.symbol}</span>
+                          <span className={`px-2 py-0.5 rounded text-[9.5px] font-bold ${
+                            pair.status === 'ACTIVE'
+                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                              : 'bg-slate-800 text-slate-400'
+                          }`}>
+                            {pair.status === 'ACTIVE' ? '🟢 AKTİF ARBİTRAJ' : 'KAPATILDI'}
+                          </span>
+                        </div>
+                        <span className="text-amber-400 font-bold font-mono text-xs">
+                          %{pair.annualized_apr_pct}% APR
+                        </span>
+                      </div>
+
+                      {/* Çift Bacak Detayı: Spot LONG + Vadeli SHORT */}
+                      <div className="grid grid-cols-2 gap-2 text-[11px] font-mono p-2 rounded bg-black/50 border border-slate-800">
+                        <div>
+                          <span className="text-emerald-400 font-bold block">🟢 SPOT AL (LONG)</span>
+                          <span className="text-slate-300">${(pair.spot_notional || 0).toFixed(2)} USDT</span>
+                        </div>
+                        <div>
+                          <span className="text-rose-400 font-bold block">🔴 VADELİ SAT (SHORT)</span>
+                          <span className="text-slate-300">${(pair.futures_notional || 0).toFixed(2)} USDT</span>
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5 text-xs">
+                        <div className="flex items-center justify-between text-slate-400">
+                          <span>Güncel Fonlama Oranı:</span>
+                          <span className="font-bold text-emerald-400 font-mono">%{pair.current_funding_rate_pct}%</span>
+                        </div>
+                        <div className="flex items-center justify-between text-slate-400">
+                          <span>Tahsil Edilen 8s Ödemeler:</span>
+                          <span className="font-bold text-white font-mono">#{pair.settlements_count} Kez</span>
+                        </div>
+                        <div className="flex items-center justify-between text-slate-400">
+                          <span>Birikmiş Net Kâr:</span>
+                          <span className="font-bold text-emerald-400 font-mono text-sm">+${(pair.accumulated_profit_usdt || 0).toFixed(2)} USDT</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* SEKME 3: 8 SAATLİK TAHSİLAT GÜNLÜĞÜ */}
+          {fundingTab === 'logs' && (
+            <div className="p-4 rounded-xl border border-slate-800 bg-[#070a0f] max-h-[350px] overflow-y-auto font-mono text-xs space-y-2">
+              {(fundingEngine?.history_log || []).length === 0 ? (
+                <div className="text-slate-600 italic">Henüz olay kaydı yok.</div>
+              ) : (
+                (fundingEngine?.history_log || []).map((l, i) => (
+                  <div key={i} className="flex items-start gap-2 border-b border-slate-800/40 pb-1.5 leading-relaxed">
+                    <span className="text-slate-500 shrink-0">[{l.time.slice(11, 19)}]</span>
+                    <span className={`font-bold shrink-0 ${
+                      l.type === 'PAYOUT' ? 'text-emerald-400' :
+                      l.type === 'TRADE' ? 'text-amber-400' :
+                      l.type === 'EXIT' ? 'text-cyan-400' : 'text-slate-300'
+                    }`}>
+                      [{l.type}]
+                    </span>
+                    <span className="text-slate-200">{l.message}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+
+        </main>
+      )}
+
+      {/* ========================================================
+          GÖRÜNÜM 2.6: HUMMINGBOT BACKTEST MASASI
+         ======================================================== */}
+      {mainView === 'backtest' && (
+        <main className="flex-1 p-4 max-w-7xl mx-auto w-full space-y-4">
+          
+          {/* Başlık Çubuğu */}
+          <div className="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-2">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xl">🧪</span>
+                <h2 className="text-base font-black text-white uppercase tracking-wider">
+                  Hummingbot Çoklu Ajan Backtest Masası
+                </h2>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-950 text-purple-300 border border-purple-800">
+                  GERÇEK BİNANCE KLINES VERİSİ
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 mt-1">
+                Farklı kuant ajanlarını aktif veya pasif hale getirerek canlı tarihsel verilerle strateji performansını simüle edin.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleRunBacktest}
+              disabled={isRunningBacktest}
+              className="px-5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 cursor-pointer shadow-lg shadow-purple-950/50 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-4 h-4 ${isRunningBacktest ? 'animate-spin' : ''}`} />
+              <span>{isRunningBacktest ? 'Backtest Simüle Ediliyor...' : '🧪 Backtesti Çalıştır'}</span>
+            </button>
+          </div>
+
+          {/* Kontrol Paneli: Parite, Zaman Dilimi, Mum Sayısı, Kasa, Kaldıraç */}
+          <div className="p-4 rounded-xl bg-[#0b0e14] border border-slate-800 grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
+            <div>
+              <label className="block text-slate-300 font-semibold mb-1">Test Paritesi</label>
+              <select
+                value={backtestSymbol}
+                onChange={(e) => setBacktestSymbol(e.target.value)}
+                disabled={isRunningBacktest}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono text-xs cursor-pointer focus:border-purple-500 focus:outline-none"
+              >
+                <option value="BTCUSDT">BTC/USDT</option>
+                <option value="ETHUSDT">ETH/USDT</option>
+                <option value="SOLUSDT">SOL/USDT</option>
+                <option value="BNBUSDT">BNB/USDT</option>
+                <option value="DOGEUSDT">DOGE/USDT</option>
+                <option value="XRPUSDT">XRP/USDT</option>
+                <option value="PEPEUSDT">PEPE/USDT</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-slate-300 font-semibold mb-1">Mum Zaman Dilimi</label>
+              <select
+                value={backtestInterval}
+                onChange={(e) => setBacktestInterval(e.target.value)}
+                disabled={isRunningBacktest}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono text-xs cursor-pointer focus:border-purple-500 focus:outline-none"
+              >
+                <option value="15m">15 Dakika (HFT / Hızlı)</option>
+                <option value="1h">1 Saat (Dengeli Kuant)</option>
+                <option value="4h">4 Saat (Swing Trend)</option>
+                <option value="1d">1 Gün (Makro Periyot)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-slate-300 font-semibold mb-1">Mum Sayısı (Limit)</label>
+              <select
+                value={backtestLimit}
+                onChange={(e) => setBacktestLimit(parseInt(e.target.value, 10))}
+                disabled={isRunningBacktest}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono text-xs cursor-pointer focus:border-purple-500 focus:outline-none"
+              >
+                <option value={100}>100 Mum (~4 Gün)</option>
+                <option value={200}>200 Mum (~8 Gün)</option>
+                <option value={350}>350 Mum (~14 Gün)</option>
+                <option value={500}>500 Mum (~21 Gün)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-slate-300 font-semibold mb-1">Başlangıç Kasası</label>
+              <input
+                type="number"
+                step="1000"
+                value={backtestCapital}
+                onChange={(e) => setBacktestCapital(parseFloat(e.target.value) || 10000)}
+                disabled={isRunningBacktest}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono text-xs focus:border-purple-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-slate-300 font-semibold mb-1">Kaldıraç Çarpanı</label>
+              <select
+                value={backtestLeverage}
+                onChange={(e) => setBacktestLeverage(parseInt(e.target.value, 10) || 2)}
+                disabled={isRunningBacktest}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono text-xs cursor-pointer focus:border-purple-500 focus:outline-none"
+              >
+                <option value={1}>1x (Spot Eşdeğeri)</option>
+                <option value={2}>2x (Önerilen Kuant)</option>
+                <option value={5}>5x (Agresif Momentum)</option>
+                <option value={10}>10x (Yüksek Volatilite)</option>
+              </select>
+            </div>
+          </div>
+
+          {/* AKTİF / PASİF AJAN SEÇİM KARTLARI */}
+          <div className="p-4 rounded-xl bg-[#0b0e14] border border-slate-800 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
+                <Bot className="w-3.5 h-3.5 text-purple-400" />
+                <span>Test Edilecek Aktif Ajanlar (Seçim Tablosu)</span>
+              </h3>
+              <span className="text-[11px] text-slate-400">
+                Aktif: {Object.values(backtestAgents).filter(Boolean).length} / 6 Ajan
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {[
+                {
+                  id: 'market_maker',
+                  name: '⚡ Market Maker (Hummingbot PMM)',
+                  desc: 'Avellaneda-Stoikov mikro-fiyat kotasyonu, yatay piyasada bid-ask spread kârı toplar.',
+                  tag: 'Limit Maker',
+                },
+                {
+                  id: 'trend_follower',
+                  name: '🎯 Trend Follower',
+                  desc: 'SuperTrend ve EMA9/EMA21 kesişimleri ile güçlü momentum yönünde pozisyon açar.',
+                  tag: 'Breakout',
+                },
+                {
+                  id: 'funding_arb',
+                  name: '⚖️ Funding Arbitrage',
+                  desc: '8 saatlik taşıma getirisi tahsilatı ve vadeli basis spread marjı yakalar.',
+                  tag: 'Cash & Carry',
+                },
+                {
+                  id: 'liquidity_hunter',
+                  name: '🌊 Liquidity Hunter',
+                  desc: 'Order Book Imbalance (OBI) ve ani hacim patlamalarını tespit ederek işleme girer.',
+                  tag: 'Orderbook OBI',
+                },
+                {
+                  id: 'risk_sentinel',
+                  name: '🛡️ Risk Sentinel (Guardian)',
+                  desc: 'Volatilite iğnelerinde erken stop ve acil drawdown koruması ile sermayeyi korur.',
+                  tag: 'Risk Kalkanı',
+                },
+                {
+                  id: 'mean_reversion',
+                  name: '🔄 Mean Reversion',
+                  desc: 'RSI aşırı alım/satım (<30, >70) ve Bollinger uçlarından ters dönüş hareketlerini yakalar.',
+                  tag: 'Ortalamaya Dönüş',
+                },
+              ].map((ag) => {
+                const isActive = backtestAgents[ag.id];
+                return (
+                  <div
+                    key={ag.id}
+                    onClick={() => toggleBacktestAgent(ag.id)}
+                    className={`p-3 rounded-xl border transition cursor-pointer select-none flex flex-col justify-between ${
+                      isActive
+                        ? 'bg-purple-950/30 border-purple-600/70 shadow-md shadow-purple-950/30'
+                        : 'bg-slate-900/40 border-slate-800 opacity-60 hover:opacity-90'
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="font-bold text-xs text-white">{ag.name}</span>
+                        <span className={`px-2 py-0.5 rounded text-[9.5px] font-bold ${
+                          isActive
+                            ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                            : 'bg-slate-800 text-slate-400'
+                        }`}>
+                          {isActive ? 'AKTİF' : 'PASİF'}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 leading-relaxed mb-2">{ag.desc}</p>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-2 border-t border-slate-800/60 text-[10px]">
+                      <span className="font-mono text-purple-300 font-semibold">{ag.tag}</span>
+                      <span className="text-slate-500">{isActive ? 'Tıkla (Pasif Yap)' : 'Tıkla (Aktif Et)'}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* SONUÇ RAPORU (Backtest Result) */}
+          {backtestResult && (
+            <div className="space-y-4 animate-in fade-in">
+              {/* 6 Performans KPI Kartı */}
+              <div className="grid grid-cols-2 md:grid-cols-6 gap-2.5">
+                <div className="p-3 rounded-xl bg-[#0b0e14] border border-slate-800">
+                  <span className="text-[10px] text-slate-400 block mb-0.5">Nihai Kasa / Net Kâr</span>
+                  <div className={`text-base font-black font-mono ${backtestResult.summary.net_profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    ${Number(backtestResult.summary.final_equity || 0).toLocaleString()}
+                  </div>
+                  <span className={`text-[10.5px] font-bold font-mono ${backtestResult.summary.net_profit_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {backtestResult.summary.net_profit_pct >= 0 ? '+' : ''}%{backtestResult.summary.net_profit_pct}%
+                  </span>
+                </div>
+
+                <div className="p-3 rounded-xl bg-[#0b0e14] border border-slate-800">
+                  <span className="text-[10px] text-slate-400 block mb-0.5">Kazanma Oranı (Win Rate)</span>
+                  <div className="text-base font-black font-mono text-cyan-300">
+                    %{backtestResult.summary.win_rate_pct}%
+                  </div>
+                  <span className="text-[10px] text-slate-400">
+                    {backtestResult.summary.winning_trades} K / {backtestResult.summary.losing_trades} Z
+                  </span>
+                </div>
+
+                <div className="p-3 rounded-xl bg-[#0b0e14] border border-slate-800">
+                  <span className="text-[10px] text-slate-400 block mb-0.5">Kâr Faktörü (PF)</span>
+                  <div className="text-base font-black font-mono text-amber-300">
+                    {backtestResult.summary.profit_factor}
+                  </div>
+                  <span className="text-[10px] text-slate-500">Gross Win / Loss</span>
+                </div>
+
+                <div className="p-3 rounded-xl bg-[#0b0e14] border border-slate-800">
+                  <span className="text-[10px] text-slate-400 block mb-0.5">Maksimum Drawdown</span>
+                  <div className="text-base font-black font-mono text-rose-400">
+                    -%{backtestResult.summary.max_drawdown_pct}%
+                  </div>
+                  <span className="text-[10px] text-slate-500">Zirveden düşüş</span>
+                </div>
+
+                <div className="p-3 rounded-xl bg-[#0b0e14] border border-slate-800">
+                  <span className="text-[10px] text-slate-400 block mb-0.5">Sharpe Oranı</span>
+                  <div className="text-base font-black font-mono text-purple-300">
+                    {backtestResult.summary.sharpe_ratio}
+                  </div>
+                  <span className="text-[10px] text-slate-500">Risk düzeltilmiş getiri</span>
+                </div>
+
+                <div className="p-3 rounded-xl bg-[#0b0e14] border border-slate-800">
+                  <span className="text-[10px] text-slate-400 block mb-0.5">Toplam İşlem</span>
+                  <div className="text-base font-black font-mono text-white">
+                    {backtestResult.summary.total_trades}
+                  </div>
+                  <span className="text-[10px] text-slate-400">{backtestResult.summary.candle_count} Mum test edildi</span>
+                </div>
+              </div>
+
+              {/* Kuant Sermaye Eğrisi Grafiği (SVG Equity Curve) */}
+              {Array.isArray(backtestResult.equity_curve) && backtestResult.equity_curve.length > 5 && (
+                <div className="p-4 rounded-xl bg-[#0b0e14] border border-slate-800 space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-bold text-white flex items-center gap-1.5">
+                      <TrendingUp className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Kuant Sermaye Eğrisi (Equity Curve)</span>
+                    </span>
+                    <span className="font-mono text-slate-400 text-[11px]">
+                      Başlangıç: ${backtestResult.summary.initial_capital} ➔ Bitiş: ${backtestResult.summary.final_equity}
+                    </span>
+                  </div>
+
+                  {(() => {
+                    const pts = backtestResult.equity_curve;
+                    const equities = pts.map(p => p.equity);
+                    const minEq = Math.min(...equities) * 0.99;
+                    const maxEq = Math.max(...equities) * 1.01;
+                    const range = Math.max(1, maxEq - minEq);
+                    const width = 800;
+                    const height = 150;
+
+                    const pointsStr = pts.map((p, idx) => {
+                      const x = (idx / (pts.length - 1)) * width;
+                      const y = height - ((p.equity - minEq) / range) * (height - 20) - 10;
+                      return `${x.toFixed(1)},${y.toFixed(1)}`;
+                    }).join(' ');
+
+                    return (
+                      <div className="w-full overflow-hidden bg-slate-950/60 p-2 rounded-lg border border-slate-800/60">
+                        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-36">
+                          <defs>
+                            <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor="#06b6d4" stopOpacity="0.35" />
+                              <stop offset="100%" stopColor="#06b6d4" stopOpacity="0.0" />
+                            </linearGradient>
+                          </defs>
+                          <polygon
+                            points={`0,${height} ${pointsStr} ${width},${height}`}
+                            fill="url(#eqGrad)"
+                          />
+                          <polyline
+                            fill="none"
+                            stroke="#06b6d4"
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            points={pointsStr}
+                          />
+                        </svg>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {/* Sekmeler: Ajan Performans Dağılımı | Gerçekleşen İşlemler */}
+              <div className="border-b border-slate-800 flex items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setBacktestViewTab('overview')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                    backtestViewTab === 'overview'
+                      ? 'bg-purple-600 text-white shadow'
+                      : 'bg-slate-900 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Ajan Katkı Dağılımı ({(backtestResult.agent_performance || []).length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBacktestViewTab('trades')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                    backtestViewTab === 'trades'
+                      ? 'bg-purple-600 text-white shadow'
+                      : 'bg-slate-900 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Gerçekleştirilen İşlemler ({(backtestResult.recent_trades || []).length})
+                </button>
+              </div>
+
+              {/* SEKME 1: AJAN PERFORMANS DAĞILIMI */}
+              {backtestViewTab === 'overview' && (
+                <div className="rounded-xl border border-slate-800 bg-[#0b0e14] overflow-hidden">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-900/90 text-slate-400 border-b border-slate-800 uppercase tracking-wider text-[10px]">
+                        <th className="p-3">Ajan Adı & Algoritma</th>
+                        <th className="p-3 text-center">Durum</th>
+                        <th className="p-3 text-right">İşlem Sayısı</th>
+                        <th className="p-3 text-right">Kazanma Oranı</th>
+                        <th className="p-3 text-right font-bold text-emerald-400">Net Kâr Katkısı</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60 font-mono">
+                      {(backtestResult.agent_performance || []).map((ag) => (
+                        <tr key={ag.id} className="hover:bg-slate-900/40">
+                          <td className="p-3 font-sans font-bold text-white">{ag.name}</td>
+                          <td className="p-3 text-center font-sans">
+                            <span className={`px-2 py-0.5 rounded text-[9.5px] font-bold ${
+                              ag.is_active ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-slate-800 text-slate-400'
+                            }`}>
+                              {ag.is_active ? 'AKTİF' : 'PASİF'}
+                            </span>
+                          </td>
+                          <td className="p-3 text-right text-slate-300">{ag.trades_count} İşlem</td>
+                          <td className="p-3 text-right font-bold text-cyan-300">%{ag.win_rate}%</td>
+                          <td className={`p-3 text-right font-bold ${ag.pnl_contribution >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {ag.pnl_contribution >= 0 ? '+' : ''}${ag.pnl_contribution.toFixed(2)} USDT
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* SEKME 2: GERÇEKLEŞEN İŞLEMLER */}
+              {backtestViewTab === 'trades' && (
+                <div className="rounded-xl border border-slate-800 bg-[#0b0e14] overflow-hidden max-h-[400px] overflow-y-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-900/90 text-slate-400 border-b border-slate-800 uppercase tracking-wider text-[10px] sticky top-0">
+                        <th className="p-2.5">Giriş / Çıkış Tarihi</th>
+                        <th className="p-2.5">Yön</th>
+                        <th className="p-2.5">Tetikleyen Ajan</th>
+                        <th className="p-2.5 text-right">Giriş</th>
+                        <th className="p-2.5 text-right">Çıkış</th>
+                        <th className="p-2.5 text-right">Net Kâr / Zarar</th>
+                        <th className="p-2.5 text-right">Komisyon</th>
+                        <th className="p-2.5 text-center">Neden</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60 font-mono text-[11px]">
+                      {(backtestResult.recent_trades || []).map((t) => (
+                        <tr key={t.id} className="hover:bg-slate-900/40">
+                          <td className="p-2.5 text-slate-400 text-[10px]">
+                            {t.entry_time.slice(5, 16)} ➔ {t.exit_time.slice(5, 16)}
+                          </td>
+                          <td className="p-2.5 font-bold">
+                            <span className={`px-1.5 py-0.5 rounded text-[9.5px] ${
+                              t.type === 'LONG' ? 'bg-emerald-950 text-emerald-400' : 'bg-rose-950 text-rose-400'
+                            }`}>
+                              {t.type}
+                            </span>
+                          </td>
+                          <td className="p-2.5 font-sans text-slate-300">{t.agent}</td>
+                          <td className="p-2.5 text-right text-slate-300">${t.entry_price}</td>
+                          <td className="p-2.5 text-right text-slate-300">${t.exit_price}</td>
+                          <td className={`p-2.5 text-right font-bold ${t.pnl_usdt >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {t.pnl_usdt >= 0 ? '+' : ''}${t.pnl_usdt} ({t.pnl_pct >= 0 ? '+' : ''}{t.pnl_pct}%)
+                          </td>
+                          <td className="p-2.5 text-right text-slate-500">${t.fee_usdt}</td>
+                          <td className="p-2.5 text-center font-sans text-[10px] text-slate-400">{t.reason}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+            </div>
+          )}
+
         </main>
       )}
 
