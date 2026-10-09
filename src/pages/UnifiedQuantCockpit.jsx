@@ -136,6 +136,8 @@ export default function UnifiedQuantCockpit() {
   // 11-Agent High Council & Jev Telemetry State
   const [councilTelemetry, setCouncilTelemetry] = useState(null);
   const [hunterTelemetry, setHunterTelemetry] = useState(null);
+  const [hummingbotData, setHummingbotData] = useState(null);
+  const [binanceLatency, setBinanceLatency] = useState(38);
   const [activeCheckIndex, setActiveCheckIndex] = useState(0);
   const [selectedCouncilAgent, setSelectedCouncilAgent] = useState(null);
   const [agentHistoryLoading, setAgentHistoryLoading] = useState(false);
@@ -218,6 +220,8 @@ export default function UnifiedQuantCockpit() {
     telegram_enabled: true,
     telegram_bot_username: '@Omnideneme_bot',
     use_default_bot: true,
+    binance_api_key: '',
+    binance_api_secret: '',
     max_risk_pct: 2.0,
     leverage_cap: 5,
     stop_loss_pct: 1.85,
@@ -431,6 +435,8 @@ export default function UnifiedQuantCockpit() {
             });
           }
           if (d.hunter_pipeline) setHunterTelemetry(d.hunter_pipeline);
+          if (d.hummingbot) setHummingbotData(d.hummingbot);
+          if (d.binance_latency_ms !== undefined) setBinanceLatency(d.binance_latency_ms);
 
           if (d.engine_state !== undefined) setEngineState(d.engine_state);
 
@@ -1166,6 +1172,13 @@ export default function UnifiedQuantCockpit() {
               {wsConnected ? '🟢 SİSTEM SAĞLIKLI' : '🔴 BAĞLANTI KOPUK'}
             </span>
           </div>
+
+          <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-cyan-950/70 border border-cyan-800/60 text-[10.5px] font-mono shrink-0 select-none shadow-sm" title="Binance Futures Canlı Piyasa Verisi ve Hummingbot Kuant Motoru">
+            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping"></span>
+            <span className="text-cyan-300 font-bold">⚡ BİNANCE CANLI ({binanceLatency}ms)</span>
+            <span className="text-slate-600">|</span>
+            <span className="text-purple-300 font-bold">🤖 Hummingbot PMM</span>
+          </div>
         </div>
 
         {/* Sağ Grup: Bakiye, Hesap Seçici & Motor Butonu */}
@@ -1312,8 +1325,9 @@ export default function UnifiedQuantCockpit() {
                     Çift Piyasa Radarı (Spot + Futures Arbitraj & Hacim Anomalisi)
                   </h3>
                 </div>
-                <span className="text-[9.5px] font-mono text-cyan-400 font-bold bg-cyan-950/80 px-2 py-0.5 rounded border border-cyan-800/60">
-                  15 PARİTE CANLI RADAR
+                <span className="text-[9.5px] font-mono text-cyan-400 font-bold bg-cyan-950/80 px-2 py-0.5 rounded border border-cyan-800/60 flex items-center gap-1.5 shadow-sm">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
+                  <span>15 PARİTE CANLI BİNANCE ({binanceLatency}ms)</span>
                 </span>
               </div>
 
@@ -2555,6 +2569,64 @@ export default function UnifiedQuantCockpit() {
                         </div>
                       </div>
                     ))}
+                  </div>
+
+                  {/* Global Binance API Bilgileri */}
+                  <div className="p-3.5 rounded-lg bg-slate-900/90 border border-cyan-800/40 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Key className="w-4 h-4 text-cyan-400" />
+                        <h4 className="text-xs font-bold text-white uppercase">Binance Futures API Anahtarları (Sistem Genel)</h4>
+                      </div>
+                      <span className="text-[10px] text-emerald-400 font-mono bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-800">
+                        🔒 Dahili Güvenli Depolama (ENV Yok)
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400">
+                      API anahtarlarınız doğrudan bu terminalin dahili veritabanında saklanır. Dışarıya veya ENV ortam değişkenlerine açık değildir.
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                      <div>
+                        <label className="block text-slate-400 mb-1 font-semibold">Binance API Key</label>
+                        <input
+                          type="password"
+                          placeholder="API Anahtarınızı giriniz..."
+                          value={settingsForm.binance_api_key || ''}
+                          onChange={(e) => setSettingsForm({ ...settingsForm, binance_api_key: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono text-xs focus:border-cyan-500 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-400 mb-1 font-semibold">Binance API Secret</label>
+                        <input
+                          type="password"
+                          placeholder="Gizli Anahtarınızı giriniz..."
+                          value={settingsForm.binance_api_secret || ''}
+                          onChange={(e) => setSettingsForm({ ...settingsForm, binance_api_secret: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-white font-mono text-xs focus:border-cyan-500 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex justify-end pt-1">
+                      <button
+                        type="button"
+                        onClick={handleSaveSettings}
+                        disabled={isSavingSettings}
+                        className="px-3.5 py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs transition cursor-pointer flex items-center gap-1.5 shadow"
+                      >
+                        {isSavingSettings ? (
+                          <>
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            <span>KAYDEDİLİYOR...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Check className="w-3.5 h-3.5" />
+                            <span>BİNANCE ANAHTARLARINI KAYDET</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
 
                   {/* Yeni Hesap Ekle Formu */}
