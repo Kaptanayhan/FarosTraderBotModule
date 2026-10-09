@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local databases and runtime state (preserve on VPS data/)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+faros_data.db
+faros.db
+faros.log
+
+# OS files
+.DS_Store
+*.swp
