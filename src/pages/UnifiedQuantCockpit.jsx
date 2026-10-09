@@ -248,7 +248,7 @@ export default function UnifiedQuantCockpit() {
   // Load Initial REST Data
   const loadInitialData = async () => {
     try {
-      const [rRadar, rAgents, rOrders, rPositions, rTrades, rPnl, rSettings, rLogs, rConsensus] = await Promise.allSettled([
+      const [rRadar, rAgents, rOrders, rPositions, rTrades, rPnl, rSettings, rLogs, rConsensus, rCouncil] = await Promise.allSettled([
         fetch(`${API_BASE}/api/market/radar`).then(r => r.json()),
         fetch(`${API_BASE}/api/agents`).then(r => r.json()),
         fetch(`${API_BASE}/api/orders?limit=100`).then(r => r.json()),
@@ -273,7 +273,6 @@ export default function UnifiedQuantCockpit() {
       if (rSettings.status === 'fulfilled' && rSettings.value?.settings) setSettingsForm(prev => ({ ...prev, ...rSettings.value.settings }));
       if (rLogs.status === 'fulfilled' && rLogs.value?.logs) setLogs(rLogs.value.logs);
       if (rConsensus.status === 'fulfilled' && rConsensus.value?.consensus) setJevConsensus(rConsensus.value.consensus);
-      const rCouncil = results[10];
       if (rCouncil && rCouncil.status === 'fulfilled' && rCouncil.value) {
         setCouncilTelemetry(rCouncil.value);
       }

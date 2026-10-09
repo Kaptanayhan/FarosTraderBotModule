@@ -1,0 +1,8 @@
+{
+  "name": "AegisQuant v3.0 // Autonomous Multi-Agent Terminal",
+  "description": "Autonomous multi-agent algorithmic trading cockpit and Binance Futures risk terminal with real-time council consensus, OBI radar, and position guardian.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
